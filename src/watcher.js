@@ -1,5 +1,11 @@
 import { diffSnapshots } from "./diff.js";
-import { parseDocsPage, parseGoPage } from "./parsers.js";
+import { sha256Text } from "./fingerprint.js";
+import {
+  parsePreparedDocsPage,
+  parsePreparedGoPage,
+  prepareDocsPage,
+  prepareGoPage,
+} from "./parsers.js";
 import {
   buildBootMessage,
   buildChangeMessages,
@@ -12,25 +18,27 @@ import {
 const SNAPSHOT_KEY = "snapshot:v1";
 const META_KEY = "meta:v1";
 const ERROR_KEY = "error:v1";
+const SNAPSHOT_SCHEMA = 2;
 const ERROR_REPEAT_MS = 6 * 60 * 60 * 1000;
 const HEARTBEAT_MS = 60 * 60 * 1000;
 const MAX_PAGE_BYTES = 5_000_000;
 
+function countKeys(value) {
+  return value ? Object.keys(value).length : 0;
+}
+
 export function validateSnapshot(snapshot) {
   const errors = [];
-  const chartCount = Object.keys(snapshot.go?.chart ?? {}).length;
-  const requestCount = Object.keys(snapshot.docs?.requests ?? {}).length;
-  const pricingCount = Object.keys(snapshot.docs?.pricing ?? {}).length;
-  const profileCount = Object.keys(snapshot.docs?.profiles ?? {}).length;
+  const chartCount = countKeys(snapshot.go?.chart);
+  const requestCount = countKeys(snapshot.docs?.requests);
+  const pricingCount = countKeys(snapshot.docs?.pricing);
+  const profileCount = countKeys(snapshot.docs?.profiles);
 
-  // These are intentionally well below the current counts. They are circuit
-  // breakers for a parser/layout failure, not assumptions that block legitimate
-  // model removals.
   if (chartCount < 5) errors.push(`chart parser found ${chartCount} models; refusing baseline update`);
   if (requestCount < 10) errors.push(`docs request table found ${requestCount} models; refusing baseline update`);
   if (pricingCount < 10) errors.push(`docs pricing table found ${pricingCount} rows; refusing baseline update`);
   if (profileCount < 8) errors.push(`docs request profiles found ${profileCount} models; refusing baseline update`);
-  if (Object.keys(snapshot.docs?.limits ?? {}).length !== 3) errors.push("docs dollar limits are incomplete");
+  if (countKeys(snapshot.docs?.limits) !== 3) errors.push("docs dollar limits are incomplete");
 
   for (const [name, row] of Object.entries(snapshot.docs?.requests ?? {})) {
     for (const field of ["requests5h", "requestsWeek", "requestsMonth"]) {
@@ -43,41 +51,122 @@ export function validateSnapshot(snapshot) {
   if (errors.length) throw new Error(`Snapshot validation failed: ${errors.join("; ")}`);
 }
 
-async function fetchPage(url, fetchImpl) {
+function validatorHeaders(previousSource) {
+  if (!previousSource?.fingerprint) return {};
+  if (previousSource.etag) return { "if-none-match": previousSource.etag };
+  if (previousSource.lastModified) return { "if-modified-since": previousSource.lastModified };
+  return {};
+}
+
+async function fetchPage(url, fetchImpl, previousSource) {
   const response = await fetchImpl(url, {
     headers: {
       accept: "text/html,application/xhtml+xml",
-      "user-agent": "opencode-go-watch/1.0 (+https://github.com/thelabcorner/opencode-go-watch)",
+      "user-agent": "opencode-go-watch/1.1 (+https://github.com/thelabcorner/opencode-go-watch)",
       "cache-control": "no-cache",
       pragma: "no-cache",
+      ...validatorHeaders(previousSource),
     },
     cf: { cacheTtl: 0, cacheEverything: false },
     signal: AbortSignal.timeout(15_000),
   });
+
+  const etag = response.headers.get("etag") || previousSource?.etag || null;
+  const lastModified = etag ? null : response.headers.get("last-modified") || previousSource?.lastModified || null;
+
+  if (response.status === 304) {
+    if (!previousSource?.fingerprint) throw new Error(`Fetch ${url} returned 304 without a reusable baseline fingerprint`);
+    return { kind: "not-modified", etag, lastModified };
+  }
   if (!response.ok) throw new Error(`Fetch ${url} failed with HTTP ${response.status}`);
+
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_PAGE_BYTES) {
+    throw new Error(`Fetch ${url} declared ${declared.toLocaleString()} bytes; refusing oversized page`);
+  }
+
   const body = await response.text();
   if (!body.trim()) throw new Error(`Fetch ${url} returned an empty body`);
   if (body.length > MAX_PAGE_BYTES) throw new Error(`Fetch ${url} returned ${body.length.toLocaleString()} bytes; refusing oversized page`);
-  return body;
+  return { kind: "body", body, etag, lastModified };
 }
 
-export async function collectSnapshot(env, fetchImpl = fetch, now = new Date()) {
+function sameSourceState(a, b) {
+  return Boolean(a && b)
+    && a.fingerprint === b.fingerprint
+    && a.etag === b.etag
+    && a.lastModified === b.lastModified;
+}
+
+async function resolveSource({ response, previousSource, previousSemantic, prepare, parse }) {
+  if (response.kind === "not-modified") {
+    return {
+      semantic: previousSemantic,
+      sourceState: {
+        fingerprint: previousSource.fingerprint,
+        etag: response.etag,
+        lastModified: response.lastModified,
+      },
+      mode: "304",
+    };
+  }
+
+  const prepared = prepare(response.body);
+  const fingerprint = await sha256Text(prepared.fingerprintSource);
+  const sourceState = { fingerprint, etag: response.etag, lastModified: response.lastModified };
+  if (previousSource?.fingerprint === fingerprint && previousSemantic) {
+    return { semantic: previousSemantic, sourceState, mode: "fingerprint" };
+  }
+  return { semantic: parse(prepared), sourceState, mode: "parsed" };
+}
+
+export async function collectSnapshot(env, fetchImpl = fetch, now = new Date(), previous = null) {
   const goUrl = env.OPENCODE_GO_URL || "https://opencode.ai/go";
   const docsUrl = env.OPENCODE_DOCS_URL || "https://opencode.ai/docs/go/";
-  const [goHtml, docsHtml] = await Promise.all([
-    fetchPage(goUrl, fetchImpl),
-    fetchPage(docsUrl, fetchImpl),
+  const reusable = previous?.schema === SNAPSHOT_SCHEMA && previous?.go && previous?.docs;
+  const previousGoSource = reusable ? previous.sourceState?.go ?? null : null;
+  const previousDocsSource = reusable ? previous.sourceState?.docs ?? null : null;
+
+  const [goResponse, docsResponse] = await Promise.all([
+    fetchPage(goUrl, fetchImpl, previousGoSource),
+    fetchPage(docsUrl, fetchImpl, previousDocsSource),
+  ]);
+
+  const [goResolved, docsResolved] = await Promise.all([
+    resolveSource({
+      response: goResponse,
+      previousSource: previousGoSource,
+      previousSemantic: reusable ? previous.go : null,
+      prepare: prepareGoPage,
+      parse: parsePreparedGoPage,
+    }),
+    resolveSource({
+      response: docsResponse,
+      previousSource: previousDocsSource,
+      previousSemantic: reusable ? previous.docs : null,
+      prepare: prepareDocsPage,
+      parse: parsePreparedDocsPage,
+    }),
   ]);
 
   const snapshot = {
-    schema: 1,
+    schema: SNAPSHOT_SCHEMA,
     checkedAt: now.toISOString(),
     sources: { go: goUrl, docs: docsUrl },
-    go: parseGoPage(goHtml),
-    docs: parseDocsPage(docsHtml),
+    sourceState: { go: goResolved.sourceState, docs: docsResolved.sourceState },
+    go: goResolved.semantic,
+    docs: docsResolved.semantic,
   };
   validateSnapshot(snapshot);
-  return snapshot;
+
+  return {
+    snapshot,
+    optimization: { go: goResolved.mode, docs: docsResolved.mode },
+    semanticDirty: !previous || goResolved.mode === "parsed" || docsResolved.mode === "parsed" || previous.schema !== SNAPSHOT_SCHEMA,
+    sourceStateDirty: !previous
+      || !sameSourceState(previous.sourceState?.go, goResolved.sourceState)
+      || !sameSourceState(previous.sourceState?.docs, docsResolved.sourceState),
+  };
 }
 
 export async function readSnapshot(env) {
@@ -88,10 +177,10 @@ export function validateTransition(previous, snapshot) {
   if (!previous) return;
   /** @type {Array<[string, number, number, number, number]>} */
   const checks = [
-    ["chart", Object.keys(previous.go?.chart ?? {}).length, Object.keys(snapshot.go?.chart ?? {}).length, 0.60, 4],
-    ["docs request table", Object.keys(previous.docs?.requests ?? {}).length, Object.keys(snapshot.docs?.requests ?? {}).length, 0.40, 5],
-    ["docs pricing table", Object.keys(previous.docs?.pricing ?? {}).length, Object.keys(snapshot.docs?.pricing ?? {}).length, 0.50, 8],
-    ["docs request profiles", Object.keys(previous.docs?.profiles ?? {}).length, Object.keys(snapshot.docs?.profiles ?? {}).length, 0.50, 5],
+    ["chart", countKeys(previous.go?.chart), countKeys(snapshot.go?.chart), 0.60, 4],
+    ["docs request table", countKeys(previous.docs?.requests), countKeys(snapshot.docs?.requests), 0.40, 5],
+    ["docs pricing table", countKeys(previous.docs?.pricing), countKeys(snapshot.docs?.pricing), 0.50, 8],
+    ["docs request profiles", countKeys(previous.docs?.profiles), countKeys(snapshot.docs?.profiles), 0.50, 5],
   ];
 
   for (const [label, before, after, maxDropFraction, minDrop] of checks) {
@@ -133,11 +222,14 @@ async function maybeHeartbeat(env, checkedAt) {
 }
 
 export async function runWatch(env, { fetchImpl = fetch, now = new Date(), forceNotify = false } = {}) {
-  const snapshot = await collectSnapshot(env, fetchImpl, now);
+  // Read the existing baseline before network fetches so HTTP validators can turn
+  // the steady-state path into two 304 responses and zero HTML parsing.
   const [previous, previousError] = await Promise.all([
     readSnapshot(env),
     env.STATE.get(ERROR_KEY, { type: "json" }),
   ]);
+  const collected = await collectSnapshot(env, fetchImpl, now, previous);
+  const { snapshot, optimization } = collected;
   const timeZone = env.TIMEZONE || "America/Chicago";
 
   if (!previous) {
@@ -152,15 +244,17 @@ export async function runWatch(env, { fetchImpl = fetch, now = new Date(), force
       bootstrappedAt: snapshot.checkedAt,
     });
     if (previousError) await env.STATE.delete(ERROR_KEY);
-    return { status: "bootstrapped", changes: [], snapshot };
+    return { status: "bootstrapped", changes: [], snapshot, optimization };
   }
 
-  validateTransition(previous, snapshot);
-  const changes = diffSnapshots(previous, snapshot);
+  let changes = [];
+  if (collected.semanticDirty) {
+    validateTransition(previous, snapshot);
+    changes = diffSnapshots(previous, snapshot);
+  }
+
   if (changes.length) {
     const messages = buildChangeMessages(changes, snapshot, timeZone);
-    // Baseline is advanced only after every Telegram message succeeds. A network
-    // failure therefore retries the exact same semantic change next cron.
     for (const message of messages) await sendTelegram(env, message, fetchImpl);
     await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
     await writeMeta(env, {
@@ -176,6 +270,10 @@ export async function runWatch(env, { fetchImpl = fetch, now = new Date(), force
         .replace("Baseline captured. Semantic monitoring is live.", "No semantic changes detected. Current pages parse cleanly.");
       await sendTelegram(env, manual, fetchImpl);
     }
+
+    // Persist new validators/fingerprints only if they actually changed. Normal
+    // five-minute checks therefore perform no snapshot KV write.
+    if (collected.sourceStateDirty) await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
     await maybeHeartbeat(env, snapshot.checkedAt);
   }
 
@@ -184,7 +282,7 @@ export async function runWatch(env, { fetchImpl = fetch, now = new Date(), force
     await env.STATE.delete(ERROR_KEY);
   }
 
-  return { status: changes.length ? "changed" : "unchanged", changes, snapshot };
+  return { status: changes.length ? "changed" : "unchanged", changes, snapshot, optimization };
 }
 
 function fingerprintError(error) {
