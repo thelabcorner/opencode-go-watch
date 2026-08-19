@@ -1,75 +1,98 @@
 import { extractHtmlTables, extractSectionHtml, normalizeSpace, textContent } from "./html.js";
 
 const MONEY = /^\$([\d.]+)$/;
+const INTEGER = /^-?\d+$/;
+const PROFILE_RE = /^([^\n]+?)\s*[—–-]\s*([\d,]+)\s+input,\s*([\d,]+)\s+cached,\s*([\d,]+)\s+output\s+tokens\s+per\s+request\s*$/gim;
+const ITEM_RE = /<span\b[^>]*\bdata-value(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>(?:\s|<!--[\s\S]*?-->)*<span\b[^>]*\bdata-name(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>(?:(?:\s|<!--[\s\S]*?-->)*<span\b[^>]*\bdata-bonus(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>)?/gi;
+const GRAPH_MARKER_RE = /\bdata-component\s*=\s*["']limit-graph["']/i;
+const PROMO_TEXT_RE = /usage\s+limits?/i;
+const LIMITED_TIME_RE = /limited\s+time/i;
+const MAX_PROMO_PREFIX = 96_000;
+
+function compactScalar(value) {
+  let source = String(value ?? "").trim();
+  if (source.includes("&")) source = normalizeSpace(source);
+  return source;
+}
 
 export function parseInteger(value) {
-  const s = normalizeSpace(value).replace(/,/g, "");
-  if (!/^-?\d+$/.test(s)) return null;
+  const s = compactScalar(value).replaceAll(",", "");
+  if (!INTEGER.test(s)) return null;
   const n = Number.parseInt(s, 10);
   return Number.isSafeInteger(n) ? n : null;
 }
 
 export function parseMoney(value) {
-  const s = normalizeSpace(value);
-  if (s === "-" || s === "—" || s === "") return null;
-  const match = MONEY.exec(s.replace(/,/g, ""));
+  const source = compactScalar(value);
+  if (source === "-" || source === "—" || source === "") return null;
+  const match = MONEY.exec(source.replaceAll(",", ""));
   return match ? Number(match[1]) : null;
 }
 
 function canonicalHeader(value) {
-  return normalizeSpace(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function findTable(tables, requiredHeaders) {
-  return tables.find((rows) => {
-    const headers = (rows[0] ?? []).map(canonicalHeader);
-    return requiredHeaders.every((needle) => headers.some((header) => header.includes(needle)));
-  });
+  for (const rows of tables) {
+    const headers = rows[0] ?? [];
+    let matched = true;
+    for (const needle of requiredHeaders) {
+      let found = false;
+      for (const header of headers) {
+        if (canonicalHeader(header).includes(needle)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return rows;
+  }
+  return undefined;
 }
 
 function rowsToRequestMap(rows) {
   const out = {};
-  for (const row of rows.slice(1)) {
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
     if (row.length < 4) continue;
-    const [model, fiveHour, week, month] = row;
-    const requests5h = parseInteger(fiveHour);
-    const requestsWeek = parseInteger(week);
-    const requestsMonth = parseInteger(month);
-    if (!model || requests5h == null || requestsWeek == null || requestsMonth == null) continue;
-    out[normalizeSpace(model)] = { requests5h, requestsWeek, requestsMonth };
+    const requests5h = parseInteger(row[1]);
+    const requestsWeek = parseInteger(row[2]);
+    const requestsMonth = parseInteger(row[3]);
+    if (!row[0] || requests5h == null || requestsWeek == null || requestsMonth == null) continue;
+    out[row[0]] = { requests5h, requestsWeek, requestsMonth };
   }
   return out;
 }
 
 function rowsToPricingMap(rows) {
   const out = {};
-  for (const row of rows.slice(1)) {
-    if (row.length < 6) continue;
-    const [model, input, output, cachedRead, cachedWrite, usage] = row;
-    const name = normalizeSpace(model);
-    if (!name) continue;
-    out[name] = {
-      inputPerM: parseMoney(input),
-      outputPerM: parseMoney(output),
-      cachedReadPerM: parseMoney(cachedRead),
-      cachedWritePerM: parseMoney(cachedWrite),
-      usageUsd: parseMoney(usage),
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (row.length < 6 || !row[0]) continue;
+    out[row[0]] = {
+      inputPerM: parseMoney(row[1]),
+      outputPerM: parseMoney(row[2]),
+      cachedReadPerM: parseMoney(row[3]),
+      cachedWritePerM: parseMoney(row[4]),
+      usageUsd: parseMoney(row[5]),
     };
   }
   return out;
 }
 
 function parseLimits(sectionText) {
-  const patterns = {
-    fiveHourUsd: /5\s*hour\s*limit\s*[—–-]\s*\$([\d.]+)/i,
-    weeklyUsd: /weekly\s*limit\s*[—–-]\s*\$([\d.]+)/i,
-    monthlyUsd: /monthly\s*limit\s*[—–-]\s*\$([\d.]+)/i,
-  };
+  const fiveHour = /5\s*hour\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
+  const weekly = /weekly\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
+  const monthly = /monthly\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
   const out = {};
-  for (const [key, pattern] of Object.entries(patterns)) {
-    const match = pattern.exec(sectionText);
-    if (match) out[key] = Number(match[1]);
-  }
+  if (fiveHour) out.fiveHourUsd = Number(fiveHour[1]);
+  if (weekly) out.weeklyUsd = Number(weekly[1]);
+  if (monthly) out.monthlyUsd = Number(monthly[1]);
   return out;
 }
 
@@ -81,65 +104,63 @@ export function canonicalModelKey(value) {
     .replace(/[^a-z0-9]+/g, "");
 }
 
-function resolveProfileCandidate(candidate, requestNames) {
-  const key = canonicalModelKey(candidate);
-  if (!key) return null;
-  const exact = requestNames.find((name) => canonicalModelKey(name) === key);
-  return exact ?? null;
+function requestNameIndex(requestNames) {
+  const index = new Map();
+  for (const name of requestNames) index.set(canonicalModelKey(name), name);
+  return index;
 }
 
-/**
- * OpenCode often groups identical request profiles, e.g.:
- *   GLM-5.3/5.2/5.1
- *   Kimi K2.7/K2.6
- *
- * History shows that adding a model extends the grouped label rather than adding a
- * second row. Expand those labels back to actual request-table model names so a
- * GLM-5.3 launch is reported as "GLM-5.3 profile added" instead of a noisy
- * "GLM-5.2/5.1 removed + GLM-5.3/5.2/5.1 added" pair.
- */
-export function expandProfileLabel(label, requestNames) {
+function resolveProfileCandidate(candidate, index) {
+  const key = canonicalModelKey(candidate);
+  return key ? index.get(key) ?? null : null;
+}
+
+function expandProfileLabelIndexed(label, index) {
   const clean = normalizeSpace(label).replace(/^[-*•]\s*/, "");
-  const parts = clean.split("/").map(normalizeSpace).filter(Boolean);
-  if (parts.length === 1) return [resolveProfileCandidate(clean, requestNames) ?? clean];
+  const parts = clean.split("/").map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 1) return [resolveProfileCandidate(clean, index) ?? clean];
 
   const first = parts[0];
   const names = [];
-  const firstResolved = resolveProfileCandidate(first, requestNames);
+  const firstResolved = resolveProfileCandidate(first, index);
   if (firstResolved) names.push(firstResolved);
 
-  // Split the first model into family prefix + numeric version. Examples:
-  // "GLM-5.3" -> prefix "GLM-"; "Kimi K2.7" -> prefix "Kimi K".
   const version = /^(.*?)(\d+(?:\.\d+)+(?:\s+.*)?)$/.exec(first);
   const prefix = version?.[1] ?? "";
 
-  for (const part of parts.slice(1)) {
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i];
     let candidate = part;
     if (prefix) {
       const lead = /^([A-Za-z-]*)(\d.*)$/.exec(part);
-      if (lead && lead[1] && prefix.toLowerCase().endsWith(lead[1].toLowerCase())) {
-        candidate = `${prefix.slice(0, -lead[1].length)}${part}`;
-      } else {
-        candidate = `${prefix}${part}`;
-      }
+      candidate = lead && lead[1] && prefix.toLowerCase().endsWith(lead[1].toLowerCase())
+        ? `${prefix.slice(0, -lead[1].length)}${part}`
+        : `${prefix}${part}`;
     }
-    const resolved = resolveProfileCandidate(candidate, requestNames);
+    const resolved = resolveProfileCandidate(candidate, index);
     if (resolved) names.push(resolved);
   }
 
   return names.length ? [...new Set(names)] : [clean];
 }
 
+/** Expand grouped historical labels such as GLM-5.3/5.2/5.1. */
+export function expandProfileLabel(label, requestNames) {
+  return expandProfileLabelIndexed(label, requestNameIndex(requestNames));
+}
+
 function parseProfiles(sectionText, requestNames) {
   const out = {};
-  const pattern = /^([^\n]+?)\s*[—–-]\s*([\d,]+)\s+input,\s*([\d,]+)\s+cached,\s*([\d,]+)\s+output\s+tokens\s+per\s+request\s*$/gim;
-  for (const match of sectionText.matchAll(pattern)) {
+  const index = requestNameIndex(requestNames);
+  PROFILE_RE.lastIndex = 0;
+  let match;
+  while ((match = PROFILE_RE.exec(sectionText)) !== null) {
     const inputTokens = parseInteger(match[2]);
     const cachedTokens = parseInteger(match[3]);
     const outputTokens = parseInteger(match[4]);
     if (inputTokens == null || cachedTokens == null || outputTokens == null) continue;
     const profile = { inputTokens, cachedTokens, outputTokens };
-    for (const model of expandProfileLabel(match[1], requestNames)) out[model] = profile;
+    for (const model of expandProfileLabelIndexed(match[1], index)) out[model] = profile;
   }
   return out;
 }
@@ -147,9 +168,6 @@ function parseProfiles(sectionText, requestNames) {
 function normalizeChartName(rawName, explicitBonus) {
   let name = normalizeSpace(rawName);
   let bonus = explicitBonus ? normalizeSpace(explicitBonus) : null;
-
-  // Historical Go chart revisions encoded the promotion in the model name,
-  // e.g. "GPT 5.6 Luna (2x usage)", before data-bonus became a separate span.
   const embedded = /^(.*?)\s*\((\d+(?:\.\d+)?\s*[x×]\s*usage)\)\s*$/i.exec(name);
   if (embedded) {
     name = normalizeSpace(embedded[1]);
@@ -158,40 +176,66 @@ function normalizeChartName(rawName, explicitBonus) {
   return { name, bonus };
 }
 
-function parsePromoBanner(pageText) {
-  const lines = String(pageText ?? "").split("\n").map(normalizeSpace).filter(Boolean);
-  const direct = lines.find((line) => /usage\s+limits?/i.test(line) && /limited\s+time/i.test(line));
-  if (direct) return direct.replace(/^New\s+/i, "");
-
-  const match = /(?:^|\n)New\s*\n?([^\n]{1,220}?(?:usage limits?|usage|limited time)[^\n]*)/i.exec(pageText);
+function parsePromoBannerText(pageText) {
+  const source = String(pageText ?? "");
+  const lines = source.split("\n");
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line && PROMO_TEXT_RE.test(line) && LIMITED_TIME_RE.test(line)) return line.replace(/^New\s+/i, "");
+  }
+  const match = /(?:^|\n)New\s*\n?([^\n]{1,220}?(?:usage limits?|usage|limited time)[^\n]*)/i.exec(source);
   return match ? normalizeSpace(match[1]) : null;
 }
 
-export function parseGoPage(html) {
+function graphSlice(source) {
+  const marker = GRAPH_MARKER_RE.exec(source);
+  if (!marker) return { chartHtml: source, chartStart: -1 };
+  const start = source.lastIndexOf("<figure", marker.index);
+  if (start < 0) return { chartHtml: source, chartStart: -1 };
+  const close = source.indexOf("</figure>", marker.index);
+  if (close < 0) return { chartHtml: source.slice(start), chartStart: start };
+  return { chartHtml: source.slice(start, close + 9), chartStart: start };
+}
+
+/**
+ * Cheap pre-parser used by the watcher before SHA-256 fingerprinting. It limits
+ * downstream work to the graph and the small prefix where OpenCode renders the
+ * promotional banner, rather than repeatedly stripping the entire landing page.
+ */
+export function prepareGoPage(html) {
   const source = String(html ?? "");
+  const { chartHtml, chartStart } = graphSlice(source);
+  const prefixEnd = chartStart >= 0 ? chartStart : source.length;
+  const prefixStart = Math.max(0, prefixEnd - MAX_PROMO_PREFIX);
+  const promoText = textContent(source.slice(prefixStart, prefixEnd));
+  const promoBanner = parsePromoBannerText(promoText);
+  return {
+    chartHtml,
+    promoBanner,
+    fingerprintSource: `${chartHtml}\n<!--promo:${promoBanner ?? ""}-->`,
+  };
+}
+
+export function parsePreparedGoPage(prepared) {
   const chart = {};
-
-  // Parse the semantic pill content instead of SVG geometry. Attribute values may
-  // be omitted (data-value) or present (data-value="...").
-  const itemPattern = /<span\b[^>]*\bdata-value(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>(?:\s|<!--[\s\S]*?-->)*<span\b[^>]*\bdata-name(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>(?:(?:\s|<!--[\s\S]*?-->)*<span\b[^>]*\bdata-bonus(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>)?/gi;
-
-  for (const match of source.matchAll(itemPattern)) {
+  ITEM_RE.lastIndex = 0;
+  let match;
+  while ((match = ITEM_RE.exec(prepared.chartHtml)) !== null) {
     const requests5h = parseInteger(textContent(match[1]));
     const normalized = normalizeChartName(textContent(match[2]), match[3] ? textContent(match[3]) : null);
     if (!normalized.name || requests5h == null) continue;
     chart[normalized.name] = { requests5h, bonus: normalized.bonus };
   }
 
-  // Fallback for a renderer that flattens the graph to text. This intentionally
-  // scopes itself to the chart region to avoid interpreting unrelated numbers.
-  const pageText = textContent(source);
   if (!Object.keys(chart).length) {
-    const regionMatch = /Go\s+1x[\s\S]{0,5000}?Requests per 5 hour/i.exec(pageText);
-    const region = regionMatch?.[0] ?? "";
+    const chartText = textContent(prepared.chartHtml);
+    const regionMatch = /Go\s+1x[\s\S]{0,5000}?Requests per 5 hour/i.exec(chartText);
+    const region = regionMatch?.[0] ?? chartText;
     const rowPattern = /([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9().×x-]+){0,6})(?=\s+[\d,]+\s+[A-Z]|\s+\d+(?:\.\d+)?[x×]\s+usage|\s+Requests per 5 hour)/g;
-    for (const match of region.matchAll(rowPattern)) {
-      const requests5h = parseInteger(match[1]);
-      const normalized = normalizeChartName(match[2], null);
+    let row;
+    while ((row = rowPattern.exec(region)) !== null) {
+      const requests5h = parseInteger(row[1]);
+      const normalized = normalizeChartName(row[2], null);
       if (requests5h != null && normalized.name) chart[normalized.name] = { requests5h, bonus: normalized.bonus };
     }
     const bonusMatch = /([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9.-]+){0,5})\s+(\d+(?:\.\d+)?[x×]\s+usage)\s+Requests per 5 hour/i.exec(region);
@@ -203,7 +247,11 @@ export function parseGoPage(html) {
   }
 
   if (!Object.keys(chart).length) throw new Error("Go page parser found no chart models");
-  return { chart, promoBanner: parsePromoBanner(pageText) };
+  return { chart, promoBanner: prepared.promoBanner };
+}
+
+export function parseGoPage(html) {
+  return parsePreparedGoPage(prepareGoPage(html));
 }
 
 function extractUsageNotes(usageText) {
@@ -215,11 +263,15 @@ function extractUsageNotes(usageText) {
   return notes;
 }
 
-export function parseDocsPage(html) {
+export function prepareDocsPage(html) {
   const source = String(html ?? "");
   const usageHtml = extractSectionHtml(source, "Usage\\s+limits") || source;
-  const usageText = textContent(usageHtml);
-  const tables = extractHtmlTables(usageHtml);
+  return { usageHtml, fingerprintSource: usageHtml };
+}
+
+export function parsePreparedDocsPage(prepared) {
+  const usageText = textContent(prepared.usageHtml);
+  const tables = extractHtmlTables(prepared.usageHtml);
   const requestTable = findTable(tables, ["model", "requests per 5 hour", "requests per week", "requests per month"]);
   const pricingTable = findTable(tables, ["model", "input", "output", "cached read", "usage"]);
 
@@ -245,6 +297,10 @@ export function parseDocsPage(html) {
     notes,
     usageText: usageText.replace(/\s+/g, " ").trim(),
   };
+}
+
+export function parseDocsPage(html) {
+  return parsePreparedDocsPage(prepareDocsPage(html));
 }
 
 export function parseBonusMultiplier(value) {
@@ -276,9 +332,7 @@ export function deriveConsistency(go, docs) {
       continue;
     }
     let multiplier = parseBonusMultiplier(chart.bonus);
-    if (!multiplier && bannerPromo && canonicalModelKey(bannerPromo.model) === canonicalModelKey(name)) {
-      multiplier = bannerPromo.multiplier;
-    }
+    if (!multiplier && bannerPromo && canonicalModelKey(bannerPromo.model) === canonicalModelKey(name)) multiplier = bannerPromo.multiplier;
     if (multiplier && Math.round(doc.requests5h * multiplier) === chart.requests5h) {
       out[name] = { status: "promotion", chart: chart.requests5h, docs: doc.requests5h, multiplier };
       continue;
