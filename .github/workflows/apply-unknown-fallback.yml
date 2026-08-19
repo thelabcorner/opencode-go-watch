@@ -34,3 +34,4 @@ jobs:
           git add -A
           git commit -m "feat: surface unclassified monitored changes"
           git push
+# one-shot trigger
