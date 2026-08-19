@@ -2,21 +2,43 @@ import { canonicalModelKey, deriveConsistency } from "./parsers.js";
 
 const MAX_MESSAGE = 3850;
 const CHAT_ID_KEY = "telegram:chat_id:v1";
+const NUMBER_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
+const TIME_FORMATTERS = new Map();
+const LABELS = Object.freeze({
+  fiveHourUsd: "5 hour",
+  weeklyUsd: "Weekly",
+  monthlyUsd: "Monthly",
+  requests5h: "5 hour",
+  requestsWeek: "Weekly",
+  requestsMonth: "Monthly",
+  inputTokens: "Input/request",
+  cachedTokens: "Cached/request",
+  outputTokens: "Output/request",
+  inputPerM: "Input / 1M",
+  outputPerM: "Output / 1M",
+  cachedReadPerM: "Cached read / 1M",
+  cachedWritePerM: "Cached write / 1M",
+  usageUsd: "Included usage",
+  bonus: "Promotion",
+  deepSeekPeakHours: "DeepSeek peak hours",
+  limitsDisclaimer: "Limits disclaimer",
+});
 
 export function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+  return String(value ?? "").replace(/[&<>\"]/g, (char) => {
+    if (char === "&") return "&amp;";
+    if (char === "<") return "&lt;";
+    if (char === ">") return "&gt;";
+    return "&quot;";
+  });
 }
 
 function fmtNumber(value) {
-  return typeof value === "number" ? value.toLocaleString("en-US", { maximumFractionDigits: 6 }) : "—";
+  return typeof value === "number" ? NUMBER_FORMATTER.format(value) : "—";
 }
 
 function fmtMoney(value) {
-  return typeof value === "number" ? `$${value.toLocaleString("en-US", { maximumFractionDigits: 6 })}` : "—";
+  return typeof value === "number" ? `$${NUMBER_FORMATTER.format(value)}` : "—";
 }
 
 function fmtPercent(value) {
@@ -31,39 +53,25 @@ function direction(before, after) {
 }
 
 function labelField(field) {
-  const labels = {
-    fiveHourUsd: "5 hour",
-    weeklyUsd: "Weekly",
-    monthlyUsd: "Monthly",
-    requests5h: "5 hour",
-    requestsWeek: "Weekly",
-    requestsMonth: "Monthly",
-    inputTokens: "Input/request",
-    cachedTokens: "Cached/request",
-    outputTokens: "Output/request",
-    inputPerM: "Input / 1M",
-    outputPerM: "Output / 1M",
-    cachedReadPerM: "Cached read / 1M",
-    cachedWritePerM: "Cached write / 1M",
-    usageUsd: "Included usage",
-    bonus: "Promotion",
-    deepSeekPeakHours: "DeepSeek peak hours",
-    limitsDisclaimer: "Limits disclaimer",
-  };
-  return labels[field] ?? field;
+  return LABELS[field] ?? field;
 }
 
 function formatTime(iso, timeZone) {
   try {
-    return new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      timeZoneName: "short",
-    }).format(new Date(iso));
+    let formatter = TIME_FORMATTERS.get(timeZone);
+    if (!formatter) {
+      formatter = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZoneName: "short",
+      });
+      TIME_FORMATTERS.set(timeZone, formatter);
+    }
+    return formatter.format(new Date(iso));
   } catch {
     return iso;
   }
@@ -186,6 +194,8 @@ function renderBlocks(changes, snapshot) {
   const consumed = new Set();
   const blocks = [];
 
+  // Model lifecycle cards absorb their associated profile/pricing/chart lifecycle
+  // changes to avoid four alerts for what is conceptually one launch/removal.
   changes.forEach((change, index) => {
     if (change.type !== "model_added" && change.type !== "model_removed") return;
     consumed.add(index);
