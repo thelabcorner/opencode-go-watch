@@ -121,10 +121,10 @@ export default {
     return json({ error: "not found" }, 404);
   },
 
-  async scheduled(_controller, env, ctx) {
+  async scheduled(controller, env, ctx) {
     ctx.waitUntil((async () => {
       try {
-        const result = await runWatch(env);
+        const result = await runWatch(env, { now: new Date(controller.scheduledTime) });
         console.log(JSON.stringify({ event: "watch.complete", status: result.status, changes: result.changes.length, optimization: result.optimization }));
       } catch (error) {
         console.error("watch failed", error);
