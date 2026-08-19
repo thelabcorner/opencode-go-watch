@@ -20,6 +20,91 @@ const ROW_RE = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
 const CELL_RE = /<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]>/gi;
 const USAGE_LIMITS_ID_RE = /\bid\s*=\s*["']usage-limits["']/i;
 
+
+const MONITOR_TOKEN_RE = /<\/?[A-Za-z][^>]*>|[^<]+/g;
+const MONITOR_ATTR_RE = /([:@A-Za-z_][\w:.-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+const MONITOR_COMMENT_RE = /<!--[\s\S]*?-->/g;
+const MONITOR_SVG_RE = /<svg\b[^>]*>[\s\S]*?<\/svg\s*>/gi;
+const MONITOR_NOISE_BLOCK_RE = /<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const MONITOR_NOISE_ATTRS = new Set([
+  "class",
+  "style",
+  "id",
+  "role",
+  "tabindex",
+  "aria-hidden",
+  "data-slot",
+  "data-visible",
+  "data-component",
+  "data-hk",
+  "data-hydrate",
+  "data-hydration",
+]);
+
+function canonicalAttributeValue(value) {
+  return normalizeSpace(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * Canonicalize a monitored HTML region for the unknown-change safety net.
+ *
+ * It deliberately removes presentation/hydration noise (class/style/Solid markers,
+ * comments, scripts, and optionally SVG geometry), but preserves text, element
+ * structure, links, and unfamiliar attributes such as a future
+ * data-context-window. This is NOT used on the 304/fingerprint hot path; it only
+ * runs when a monitored response body is already being inspected.
+ */
+export function canonicalMonitoredHtml(fragment, { dropSvg = false, includeText = true } = {}) {
+  let source = String(fragment ?? "");
+  MONITOR_COMMENT_RE.lastIndex = 0;
+  source = source.replace(MONITOR_COMMENT_RE, " ");
+  MONITOR_NOISE_BLOCK_RE.lastIndex = 0;
+  source = source.replace(MONITOR_NOISE_BLOCK_RE, " ");
+  if (dropSvg) {
+    MONITOR_SVG_RE.lastIndex = 0;
+    source = source.replace(MONITOR_SVG_RE, " ");
+  }
+
+  const out = [];
+  MONITOR_TOKEN_RE.lastIndex = 0;
+  let token;
+  while ((token = MONITOR_TOKEN_RE.exec(source)) !== null) {
+    const raw = token[0];
+    if (!raw.startsWith("<")) {
+      if (!includeText) continue;
+      const text = normalizeSpace(raw);
+      if (text) out.push(text);
+      continue;
+    }
+
+    const closing = /^<\s*\//.test(raw);
+    const nameMatch = /^<\s*\/?\s*([A-Za-z][\w:-]*)/.exec(raw);
+    if (!nameMatch) continue;
+    const name = nameMatch[1].toLowerCase();
+    if (closing) {
+      out.push(`</${name}>`);
+      continue;
+    }
+
+    const attrs = [];
+    const attrSource = raw.slice(nameMatch[0].length, raw.length - 1);
+    MONITOR_ATTR_RE.lastIndex = 0;
+    let attr;
+    while ((attr = MONITOR_ATTR_RE.exec(attrSource)) !== null) {
+      const attrName = attr[1].toLowerCase();
+      if (MONITOR_NOISE_ATTRS.has(attrName) || attrName.startsWith("on")) continue;
+      const rawValue = attr[2] ?? attr[3] ?? attr[4];
+      attrs.push(rawValue == null
+        ? attrName
+        : `${attrName}="${canonicalAttributeValue(rawValue)}"`);
+    }
+    attrs.sort();
+    out.push(`<${name}${attrs.length ? ` ${attrs.join(" ")}` : ""}>`);
+  }
+
+  return out.join(" ").replace(/\s+/g, " ").trim();
+}
+
 export function decodeHtml(value) {
   const source = String(value ?? "");
   if (!source.includes("&")) return source;

@@ -25,7 +25,7 @@ const LABELS = Object.freeze({
 });
 
 export function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>\"]/g, (char) => {
+  return String(value ?? "").replace(/[&<>"]/g, (char) => {
     if (char === "&") return "&amp;";
     if (char === "<") return "&lt;";
     if (char === ">") return "&gt;";
@@ -286,6 +286,18 @@ function renderBlocks(changes, snapshot) {
       case "usage_copy_changed":
         blocks.push(`📝 <b>USAGE SECTION WORDING CHANGED</b>\n<b>Before</b> <code>${escapeHtml(change.before || "…")}</code>\n<b>After</b> <code>${escapeHtml(change.after || "…")}</code>`);
         break;
+      case "unclassified_source_change": {
+        const surface = change.source === "go" ? "Go usage chart" : "Usage docs";
+        blocks.push([
+          `🟡 <b>UNCLASSIFIED MONITORED CHANGE</b>`,
+          `<b>${surface}</b>`,
+          `The monitored surface changed, but all semantic fields the watcher currently knows about stayed the same.`,
+          ``,
+          `<b>Before</b> <code>${escapeHtml(change.before || "(nothing at this position)")}</code>`,
+          `<b>After</b> <code>${escapeHtml(change.after || "(nothing at this position)")}</code>`,
+        ].join("\n"));
+        break;
+      }
       default:
         blocks.push(`• <b>${escapeHtml(change.type)}</b>`);
     }
@@ -296,6 +308,7 @@ function renderBlocks(changes, snapshot) {
 
 function headlineFor(changes) {
   const types = new Set(changes.map((change) => change.type));
+  if (types.has("unclassified_source_change")) return "🟡 <b>OPENCODE GO · UNCLASSIFIED CHANGE</b>";
   if (changes.filter((change) => change.type === "model_added").length === 1 && types.size <= 4) return "🆕 <b>OPENCODE GO · NEW MODEL</b>";
   if (changes.filter((change) => change.type === "model_removed").length === 1 && types.size <= 4) return "🗑 <b>OPENCODE GO · MODEL REMOVED</b>";
   if ([...types].some((type) => type.includes("pricing"))) return "💰 <b>OPENCODE GO · PRICING UPDATE</b>";

@@ -29,3 +29,21 @@ test("finds changed requests, additions/removals, pricing and chart changes", ()
   assert(changes.some((c) => c.type === "pricing_changed" && c.key === "Grok 4.5"));
   assert(changes.some((c) => c.type === "chart_changed" && c.key === "Hy3" && c.field === "bonus"));
 });
+
+test("emits an unclassified fallback when monitored chart structure changes without a known semantic delta", () => {
+  const before = snap();
+  const changedHtml = goHtml.replace('data-model="hy3"', 'data-model="hy3" data-context-window="1m"');
+  const after = { ...structuredClone(before), go: parseGoPage(changedHtml), checkedAt: "2026-08-19T18:05:00.000Z" };
+  const changes = diffSnapshots(before, after);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].type, "unclassified_source_change");
+  assert.equal(changes[0].source, "go");
+  assert.match(changes[0].after, /data-context-window/);
+});
+
+test("does not emit an unclassified fallback for presentation-only markup churn", () => {
+  const before = snap();
+  const noisyHtml = goHtml.replace('data-model="hy3"', 'class="foo" style="left: 50%" data-model="hy3"');
+  const after = { ...structuredClone(before), go: parseGoPage(noisyHtml), checkedAt: "2026-08-19T18:05:00.000Z" };
+  assert.deepEqual(diffSnapshots(before, after), []);
+});

@@ -1,5 +1,29 @@
 import { deriveConsistency } from "./parsers.js";
 
+const GO_CHANGE_TYPES = new Set([
+  "chart_model_added",
+  "chart_model_removed",
+  "chart_changed",
+  "promo_banner_changed",
+]);
+
+const DOCS_CHANGE_TYPES = new Set([
+  "global_limit_changed",
+  "model_added",
+  "model_removed",
+  "request_limit_changed",
+  "request_profile_added",
+  "request_profile_removed",
+  "request_profile_changed",
+  "pricing_row_added",
+  "pricing_row_removed",
+  "pricing_changed",
+  "usage_note_added",
+  "usage_note_removed",
+  "usage_note_changed",
+  "usage_copy_changed",
+]);
+
 function same(a, b) {
   return Object.is(a, b);
 }
@@ -40,7 +64,7 @@ function diffMap({ before = {}, after = {}, addedType, removedType, changedType,
   return changes;
 }
 
-function compactTextDelta(before = "", after = "", width = 220) {
+function compactTextDelta(before = "", after = "", width = 420) {
   let prefix = 0;
   const maxPrefix = Math.min(before.length, after.length);
   while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix++;
@@ -56,6 +80,35 @@ function compactTextDelta(before = "", after = "", width = 220) {
   const newMid = after.slice(prefix, after.length - suffix || undefined).trim();
   const clip = (s) => s.length > width ? `${s.slice(0, width - 1)}…` : s;
   return { before: clip(oldMid), after: clip(newMid) };
+}
+
+function compactStructureDelta(before = "", after = "", width = 420) {
+  const tokenize = (value) => (String(value ?? "").match(/<[^>]+>|[^<>\n]+/g) ?? [])
+    .map((token) => token.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const counts = (tokens) => {
+    const map = new Map();
+    for (const token of tokens) map.set(token, (map.get(token) ?? 0) + 1);
+    return map;
+  };
+  const beforeCounts = counts(tokenize(before));
+  const afterCounts = counts(tokenize(after));
+  const removed = [];
+  const added = [];
+  for (const [token, count] of beforeCounts) {
+    const delta = count - (afterCounts.get(token) ?? 0);
+    for (let i = 0; i < delta; i++) removed.push(token);
+  }
+  for (const [token, count] of afterCounts) {
+    const delta = count - (beforeCounts.get(token) ?? 0);
+    for (let i = 0; i < delta; i++) added.push(token);
+  }
+  const clip = (tokens) => {
+    const text = tokens.join(" | ");
+    if (!text) return "";
+    return text.length > width ? `${text.slice(0, width - 1)}…` : text;
+  };
+  return { before: clip(removed), after: clip(added) };
 }
 
 function diffConsistency(oldSnapshot, newSnapshot) {
@@ -143,9 +196,44 @@ export function diffSnapshots(before, after) {
 
   changes.push(...diffConsistency(before, after));
 
-  const structural = changes.filter((change) => !["consistency_mismatch", "consistency_resolved"].includes(change.type)).length;
-  if (structural === 0 && before.docs.usageText !== after.docs.usageText) {
-    changes.push({ type: "usage_copy_changed", ...compactTextDelta(before.docs.usageText, after.docs.usageText) });
+  // Fallback layer 1: visible docs copy. This is source-scoped so a simultaneous
+  // Go chart change cannot hide an otherwise unclassified docs wording change.
+  const docsKnownBeforeCopy = changes.some((change) => DOCS_CHANGE_TYPES.has(change.type));
+  if (!docsKnownBeforeCopy && before.docs.usageText !== after.docs.usageText) {
+    changes.push({ type: "usage_copy_changed", source: "docs", ...compactTextDelta(before.docs.usageText, after.docs.usageText) });
+  }
+
+  // Fallback layer 2: unknown monitored structure/content. The parsers retain a
+  // noise-normalized representation of each watched surface. If the raw monitored
+  // fingerprint changed, parsing succeeded, all known semantic fields remained
+  // identical, but this representation changed, surface the unexplained delta.
+  // Missing monitorStructure means an older snapshot schema; bootstrap it silently.
+  const goKnown = changes.some((change) => GO_CHANGE_TYPES.has(change.type));
+  if (
+    !goKnown
+    && typeof before.go.monitorStructure === "string"
+    && typeof after.go.monitorStructure === "string"
+    && before.go.monitorStructure !== after.go.monitorStructure
+  ) {
+    changes.push({
+      type: "unclassified_source_change",
+      source: "go",
+      ...compactStructureDelta(before.go.monitorStructure, after.go.monitorStructure),
+    });
+  }
+
+  const docsKnown = changes.some((change) => DOCS_CHANGE_TYPES.has(change.type));
+  if (
+    !docsKnown
+    && typeof before.docs.monitorStructure === "string"
+    && typeof after.docs.monitorStructure === "string"
+    && before.docs.monitorStructure !== after.docs.monitorStructure
+  ) {
+    changes.push({
+      type: "unclassified_source_change",
+      source: "docs",
+      ...compactStructureDelta(before.docs.monitorStructure, after.docs.monitorStructure),
+    });
   }
 
   return changes;

@@ -136,9 +136,25 @@ test("catastrophic parser shrink is rejected instead of announcing mass removals
   const brokenGo = '<figure><span data-value>1</span><span data-name>Only One</span></figure>';
   await assert.rejects(
     runWatch(e, { fetchImpl: makeFetch({ go: brokenGo }), now: new Date("2026-08-19T18:05:00Z") }),
-    /(Go page parser found no chart models|chart parser found \d+ models)/,
+    /(?:chart parser found 1 models|Go page parser found no chart models)/,
   );
   assert.equal(Object.keys((await readSnapshot(e)).go.chart).length, 11);
+});
+
+test("unknown monitored chart changes are surfaced through Telegram", async () => {
+  const e = env();
+  await runWatch(e, { fetchImpl: makeFetch(), now: new Date("2026-08-19T18:00:00Z") });
+  const changedGo = goHtml.replace('data-model="hy3"', 'data-model="hy3" data-context-window="1m"');
+  const telegram = [];
+  const result = await runWatch(e, {
+    fetchImpl: makeFetch({ go: changedGo, telegram }),
+    now: new Date("2026-08-19T18:05:00Z"),
+  });
+  assert.equal(result.status, "changed");
+  assert(result.changes.some((change) => change.type === "unclassified_source_change" && change.source === "go"));
+  assert.equal(telegram.length, 1);
+  assert.match(telegram[0].text, /UNCLASSIFIED MONITORED CHANGE/);
+  assert.match(telegram[0].text, /data-context-window/);
 });
 
 test("steady-state conditional requests hit the 304 zero-parse fast path", async () => {

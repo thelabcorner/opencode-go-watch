@@ -64,11 +64,36 @@ test("chart DOM reordering does not alter parsed semantic data", () => {
     /(<span data-item[\s\S]*?<\/span>\s*){11}/,
     (block) => block,
   );
+  // Explicitly reorder the 11 item lines in the fixture.
   const lines = goHtml.split("\n");
   const itemLines = lines.filter((line) => line.includes("<span data-item"));
   const rebuilt = lines.filter((line) => !line.includes("<span data-item"));
   const insertAt = rebuilt.findIndex((line) => line.includes('<div data-slot="pills">')) + 1;
   rebuilt.splice(insertAt, 0, ...itemLines.reverse());
   assert.deepEqual(parseGoPage(rebuilt.join("\n")).chart, parseGoPage(goHtml).chart);
-  assert.ok(reversed);
+  assert.ok(reversed); // keep the test intentionally independent of formatting details
+});
+
+test("unknown chart attributes alter the fallback monitor structure without altering known semantics", () => {
+  const before = parseGoPage(goHtml);
+  const changedHtml = goHtml.replace('data-model="hy3"', 'data-model="hy3" data-context-window="1m"');
+  const after = parseGoPage(changedHtml);
+  assert.deepEqual(after.chart, before.chart);
+  assert.notEqual(after.monitorStructure, before.monitorStructure);
+  assert.match(after.monitorStructure, /data-context-window="1m"/);
+});
+
+test("presentation-only chart markup and item reordering are silent in the fallback monitor structure", () => {
+  const before = parseGoPage(goHtml);
+  const noisy = goHtml
+    .replace('data-model="hy3"', 'class="foo" style="left: 50%" data-model="hy3"')
+    .replace('<figure data-component="limit-graph">', '<figure class="new-layout" data-component="limit-graph">');
+  assert.equal(parseGoPage(noisy).monitorStructure, before.monitorStructure);
+
+  const lines = goHtml.split("\n");
+  const itemLines = lines.filter((line) => line.includes("<span data-item"));
+  const rebuilt = lines.filter((line) => !line.includes("<span data-item"));
+  const insertAt = rebuilt.findIndex((line) => line.includes('<div data-slot="pills">')) + 1;
+  rebuilt.splice(insertAt, 0, ...itemLines.reverse());
+  assert.equal(parseGoPage(rebuilt.join("\n")).monitorStructure, before.monitorStructure);
 });
