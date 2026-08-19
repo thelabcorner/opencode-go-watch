@@ -1,0 +1,20 @@
+name = "opencode-go-watch"
+main = "src/index.js"
+compatibility_date = "2026-08-19"
+workers_dev = true
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+OPENCODE_GO_URL = "https://opencode.ai/go"
+OPENCODE_DOCS_URL = "https://opencode.ai/docs/go/"
+TIMEZONE = "America/Chicago"
+NOTIFY_ON_BOOTSTRAP = "true"
+
+# Provision once with:
+#   npx wrangler kv namespace create OPENCODE_GO_WATCH_STATE
+# Then paste the returned namespace id below.
+[[kv_namespaces]]
+binding = "STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"

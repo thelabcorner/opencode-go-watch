@@ -1,0 +1,24 @@
+{
+  "name": "opencode-go-watch",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker that semantically monitors OpenCode Go usage limits and sends rich Telegram diffs.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage test/*.test.js",
+    "check": "for f in src/*.js test/*.test.js; do node --check \"$f\" || exit 1; done",
+    "validate": "npm run check && npm run typecheck && npm test",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf:types": "wrangler types",
+    "typecheck": "tsc --allowJs --checkJs --noEmit --target ES2023 --module ESNext --moduleResolution Bundler --lib ES2023,DOM --skipLibCheck src/*.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

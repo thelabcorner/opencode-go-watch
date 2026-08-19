@@ -1,0 +1,152 @@
+import { deriveConsistency } from "./parsers.js";
+
+function same(a, b) {
+  return Object.is(a, b);
+}
+
+function numericDelta(before, after) {
+  if (typeof before !== "number" || typeof after !== "number") return {};
+  const absolute = after - before;
+  const percent = before === 0 ? null : (absolute / before) * 100;
+  return { absolute, percent };
+}
+
+function diffMap({ before = {}, after = {}, addedType, removedType, changedType, fields }) {
+  const changes = [];
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of [...keys].sort((a, b) => a.localeCompare(b))) {
+    if (!(key in before)) {
+      changes.push({ type: addedType, key, after: after[key] });
+      continue;
+    }
+    if (!(key in after)) {
+      changes.push({ type: removedType, key, before: before[key] });
+      continue;
+    }
+    for (const field of fields) {
+      const oldValue = before[key]?.[field];
+      const newValue = after[key]?.[field];
+      if (same(oldValue, newValue)) continue;
+      changes.push({
+        type: changedType,
+        key,
+        field,
+        before: oldValue ?? null,
+        after: newValue ?? null,
+        ...numericDelta(oldValue, newValue),
+      });
+    }
+  }
+  return changes;
+}
+
+function compactTextDelta(before = "", after = "", width = 220) {
+  let prefix = 0;
+  const maxPrefix = Math.min(before.length, after.length);
+  while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix++;
+
+  let suffix = 0;
+  while (
+    suffix < before.length - prefix &&
+    suffix < after.length - prefix &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) suffix++;
+
+  const oldMid = before.slice(prefix, before.length - suffix || undefined).trim();
+  const newMid = after.slice(prefix, after.length - suffix || undefined).trim();
+  const clip = (s) => s.length > width ? `${s.slice(0, width - 1)}…` : s;
+  return { before: clip(oldMid), after: clip(newMid) };
+}
+
+function diffConsistency(oldSnapshot, newSnapshot) {
+  const oldConsistency = deriveConsistency(oldSnapshot.go, oldSnapshot.docs);
+  const newConsistency = deriveConsistency(newSnapshot.go, newSnapshot.docs);
+  const changes = [];
+  const keys = new Set([...Object.keys(oldConsistency), ...Object.keys(newConsistency)]);
+  for (const key of keys) {
+    const before = oldConsistency[key]?.status ?? null;
+    const after = newConsistency[key]?.status ?? null;
+    if (before === after) continue;
+    if (after === "mismatch") {
+      changes.push({ type: "consistency_mismatch", key, before: oldConsistency[key] ?? null, after: newConsistency[key] });
+    } else if (before === "mismatch") {
+      changes.push({ type: "consistency_resolved", key, before: oldConsistency[key], after: newConsistency[key] ?? null });
+    }
+  }
+  return changes;
+}
+
+export function diffSnapshots(before, after) {
+  const changes = [];
+
+  for (const field of ["fiveHourUsd", "weeklyUsd", "monthlyUsd"]) {
+    const oldValue = before.docs.limits[field];
+    const newValue = after.docs.limits[field];
+    if (!same(oldValue, newValue)) {
+      changes.push({ type: "global_limit_changed", field, before: oldValue, after: newValue, ...numericDelta(oldValue, newValue) });
+    }
+  }
+
+  changes.push(...diffMap({
+    before: before.docs.requests,
+    after: after.docs.requests,
+    addedType: "model_added",
+    removedType: "model_removed",
+    changedType: "request_limit_changed",
+    fields: ["requests5h", "requestsWeek", "requestsMonth"],
+  }));
+
+  changes.push(...diffMap({
+    before: before.docs.profiles,
+    after: after.docs.profiles,
+    addedType: "request_profile_added",
+    removedType: "request_profile_removed",
+    changedType: "request_profile_changed",
+    fields: ["inputTokens", "cachedTokens", "outputTokens"],
+  }));
+
+  changes.push(...diffMap({
+    before: before.docs.pricing,
+    after: after.docs.pricing,
+    addedType: "pricing_row_added",
+    removedType: "pricing_row_removed",
+    changedType: "pricing_changed",
+    fields: ["inputPerM", "outputPerM", "cachedReadPerM", "cachedWritePerM", "usageUsd"],
+  }));
+
+  changes.push(...diffMap({
+    before: before.go.chart,
+    after: after.go.chart,
+    addedType: "chart_model_added",
+    removedType: "chart_model_removed",
+    changedType: "chart_changed",
+    fields: ["requests5h", "bonus"],
+  }));
+
+  if (before.go.promoBanner !== after.go.promoBanner) {
+    changes.push({ type: "promo_banner_changed", before: before.go.promoBanner, after: after.go.promoBanner });
+  }
+
+  // notes is a flat string map, not an object-of-objects; handle it separately.
+  const noteKeys = new Set([...Object.keys(before.docs.notes ?? {}), ...Object.keys(after.docs.notes ?? {})]);
+  for (const key of noteKeys) {
+    const oldValue = before.docs.notes?.[key] ?? null;
+    const newValue = after.docs.notes?.[key] ?? null;
+    if (oldValue === newValue) continue;
+    changes.push({
+      type: oldValue == null ? "usage_note_added" : newValue == null ? "usage_note_removed" : "usage_note_changed",
+      key,
+      before: oldValue,
+      after: newValue,
+    });
+  }
+
+  changes.push(...diffConsistency(before, after));
+
+  const structural = changes.filter((change) => !["consistency_mismatch", "consistency_resolved"].includes(change.type)).length;
+  if (structural === 0 && before.docs.usageText !== after.docs.usageText) {
+    changes.push({ type: "usage_copy_changed", ...compactTextDelta(before.docs.usageText, after.docs.usageText) });
+  }
+
+  return changes;
+}
