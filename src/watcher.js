@@ -16,6 +16,7 @@ import {
 } from "./telegram.js";
 
 const SNAPSHOT_KEY = "snapshot:v1";
+const HOT_KEY = "hot:v1";
 const META_KEY = "meta:v1";
 const ERROR_KEY = "error:v1";
 const SNAPSHOT_SCHEMA = 2;
@@ -51,6 +52,19 @@ export function validateSnapshot(snapshot) {
   if (errors.length) throw new Error(`Snapshot validation failed: ${errors.join("; ")}`);
 }
 
+function hotFromSnapshot(snapshot) {
+  if (snapshot?.schema !== SNAPSHOT_SCHEMA || !snapshot.sourceState?.go || !snapshot.sourceState?.docs) return null;
+  return { schema: SNAPSHOT_SCHEMA, sourceState: snapshot.sourceState };
+}
+
+async function readHot(env) {
+  return env.STATE.get(HOT_KEY, { type: "json" });
+}
+
+async function writeHot(env, hot) {
+  await env.STATE.put(HOT_KEY, JSON.stringify(hot));
+}
+
 function validatorHeaders(previousSource) {
   if (!previousSource?.fingerprint) return {};
   if (previousSource.etag) return { "if-none-match": previousSource.etag };
@@ -58,11 +72,20 @@ function validatorHeaders(previousSource) {
   return {};
 }
 
+async function cancelBody(response) {
+  try {
+    if (response.body) await response.body.cancel();
+  } catch {
+    // The body is an optimization detail. A cancellation failure does not make the
+    // validator unusable and should not turn a healthy watch into an outage.
+  }
+}
+
 async function fetchPage(url, fetchImpl, previousSource) {
   const response = await fetchImpl(url, {
     headers: {
       accept: "text/html,application/xhtml+xml",
-      "user-agent": "opencode-go-watch/1.1 (+https://github.com/thelabcorner/opencode-go-watch)",
+      "user-agent": "opencode-go-watch/1.2 (+https://github.com/thelabcorner/opencode-go-watch)",
       "cache-control": "no-cache",
       pragma: "no-cache",
       ...validatorHeaders(previousSource),
@@ -71,17 +94,28 @@ async function fetchPage(url, fetchImpl, previousSource) {
     signal: AbortSignal.timeout(15_000),
   });
 
-  const etag = response.headers.get("etag") || previousSource?.etag || null;
-  const lastModified = etag ? null : response.headers.get("last-modified") || previousSource?.lastModified || null;
+  const responseEtag = response.headers.get("etag");
+  const responseLastModified = response.headers.get("last-modified");
+  const etag = responseEtag || previousSource?.etag || null;
+  const lastModified = etag ? null : responseLastModified || previousSource?.lastModified || null;
 
   if (response.status === 304) {
     if (!previousSource?.fingerprint) throw new Error(`Fetch ${url} returned 304 without a reusable baseline fingerprint`);
-    return { kind: "not-modified", etag, lastModified };
+    return { kind: "not-modified", mode: "304", etag, lastModified };
   }
   if (!response.ok) throw new Error(`Fetch ${url} failed with HTTP ${response.status}`);
 
+  // Some CDNs return 200 even when a conditional request names the representation
+  // they serve. An identical ETag is authoritative for representation identity, so
+  // do not decode/allocate a body just to prove the same thing again.
+  if (previousSource?.etag && responseEtag && responseEtag === previousSource.etag) {
+    await cancelBody(response);
+    return { kind: "not-modified", mode: "etag", etag: responseEtag, lastModified: null };
+  }
+
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_PAGE_BYTES) {
+    await cancelBody(response);
     throw new Error(`Fetch ${url} declared ${declared.toLocaleString()} bytes; refusing oversized page`);
   }
 
@@ -91,6 +125,29 @@ async function fetchPage(url, fetchImpl, previousSource) {
   return { kind: "body", body, etag, lastModified };
 }
 
+async function inspectSource({ response, previousSource, prepare }) {
+  if (response.kind === "not-modified") {
+    return {
+      prepared: null,
+      changed: false,
+      mode: response.mode,
+      sourceState: {
+        fingerprint: previousSource.fingerprint,
+        etag: response.etag,
+        lastModified: response.lastModified,
+      },
+    };
+  }
+
+  const prepared = prepare(response.body);
+  const fingerprint = await sha256Text(prepared.fingerprintSource);
+  const sourceState = { fingerprint, etag: response.etag, lastModified: response.lastModified };
+  if (previousSource?.fingerprint === fingerprint) {
+    return { prepared: null, changed: false, mode: "fingerprint", sourceState };
+  }
+  return { prepared, changed: true, mode: "parsed", sourceState };
+}
+
 function sameSourceState(a, b) {
   return Boolean(a && b)
     && a.fingerprint === b.fingerprint
@@ -98,74 +155,73 @@ function sameSourceState(a, b) {
     && a.lastModified === b.lastModified;
 }
 
-async function resolveSource({ response, previousSource, previousSemantic, prepare, parse }) {
-  if (response.kind === "not-modified") {
-    return {
-      semantic: previousSemantic,
-      sourceState: {
-        fingerprint: previousSource.fingerprint,
-        etag: response.etag,
-        lastModified: response.lastModified,
-      },
-      mode: "304",
-    };
-  }
-
-  const prepared = prepare(response.body);
-  const fingerprint = await sha256Text(prepared.fingerprintSource);
-  const sourceState = { fingerprint, etag: response.etag, lastModified: response.lastModified };
-  if (previousSource?.fingerprint === fingerprint && previousSemantic) {
-    return { semantic: previousSemantic, sourceState, mode: "fingerprint" };
-  }
-  return { semantic: parse(prepared), sourceState, mode: "parsed" };
+function sameHot(a, b) {
+  return Boolean(a && b)
+    && a.schema === b.schema
+    && sameSourceState(a.sourceState?.go, b.sourceState?.go)
+    && sameSourceState(a.sourceState?.docs, b.sourceState?.docs);
 }
 
-export async function collectSnapshot(env, fetchImpl = fetch, now = new Date(), previous = null) {
+async function inspectSources(env, fetchImpl, hot) {
   const goUrl = env.OPENCODE_GO_URL || "https://opencode.ai/go";
   const docsUrl = env.OPENCODE_DOCS_URL || "https://opencode.ai/docs/go/";
-  const reusable = previous?.schema === SNAPSHOT_SCHEMA && previous?.go && previous?.docs;
-  const previousGoSource = reusable ? previous.sourceState?.go ?? null : null;
-  const previousDocsSource = reusable ? previous.sourceState?.docs ?? null : null;
+  const previousGoSource = hot?.sourceState?.go ?? null;
+  const previousDocsSource = hot?.sourceState?.docs ?? null;
 
   const [goResponse, docsResponse] = await Promise.all([
     fetchPage(goUrl, fetchImpl, previousGoSource),
     fetchPage(docsUrl, fetchImpl, previousDocsSource),
   ]);
-
-  const [goResolved, docsResolved] = await Promise.all([
-    resolveSource({
-      response: goResponse,
-      previousSource: previousGoSource,
-      previousSemantic: reusable ? previous.go : null,
-      prepare: prepareGoPage,
-      parse: parsePreparedGoPage,
-    }),
-    resolveSource({
-      response: docsResponse,
-      previousSource: previousDocsSource,
-      previousSemantic: reusable ? previous.docs : null,
-      prepare: prepareDocsPage,
-      parse: parsePreparedDocsPage,
-    }),
+  const [go, docs] = await Promise.all([
+    inspectSource({ response: goResponse, previousSource: previousGoSource, prepare: prepareGoPage }),
+    inspectSource({ response: docsResponse, previousSource: previousDocsSource, prepare: prepareDocsPage }),
   ]);
+
+  return {
+    goUrl,
+    docsUrl,
+    go,
+    docs,
+    hot: { schema: SNAPSHOT_SCHEMA, sourceState: { go: go.sourceState, docs: docs.sourceState } },
+    optimization: { go: go.mode, docs: docs.mode },
+  };
+}
+
+function buildCandidate(previous, inspected, now) {
+  const go = inspected.go.changed
+    ? parsePreparedGoPage(inspected.go.prepared)
+    : previous?.go;
+  const docs = inspected.docs.changed
+    ? parsePreparedDocsPage(inspected.docs.prepared)
+    : previous?.docs;
+  if (!go || !docs) throw new Error("A semantic baseline is required to reuse an unchanged source");
 
   const snapshot = {
     schema: SNAPSHOT_SCHEMA,
     checkedAt: now.toISOString(),
-    sources: { go: goUrl, docs: docsUrl },
-    sourceState: { go: goResolved.sourceState, docs: docsResolved.sourceState },
-    go: goResolved.semantic,
-    docs: docsResolved.semantic,
+    sources: { go: inspected.goUrl, docs: inspected.docsUrl },
+    sourceState: inspected.hot.sourceState,
+    go,
+    docs,
   };
   validateSnapshot(snapshot);
+  return snapshot;
+}
 
+/**
+ * Standalone collection helper used by tests/tools. runWatch uses a still cheaper
+ * hot-state path which avoids loading the 10KB-ish semantic snapshot at all when
+ * both sources are unchanged.
+ */
+export async function collectSnapshot(env, fetchImpl = fetch, now = new Date(), previous = null) {
+  const hot = hotFromSnapshot(previous);
+  const inspected = await inspectSources(env, fetchImpl, hot);
+  const snapshot = buildCandidate(previous, inspected, now);
   return {
     snapshot,
-    optimization: { go: goResolved.mode, docs: docsResolved.mode },
-    semanticDirty: !previous || goResolved.mode === "parsed" || docsResolved.mode === "parsed" || previous.schema !== SNAPSHOT_SCHEMA,
-    sourceStateDirty: !previous
-      || !sameSourceState(previous.sourceState?.go, goResolved.sourceState)
-      || !sameSourceState(previous.sourceState?.docs, docsResolved.sourceState),
+    optimization: inspected.optimization,
+    semanticDirty: !previous || inspected.go.changed || inspected.docs.changed || previous.schema !== SNAPSHOT_SCHEMA,
+    sourceStateDirty: !hot || !sameHot(hot, inspected.hot),
   };
 }
 
@@ -196,6 +252,7 @@ export function validateTransition(previous, snapshot) {
 export async function resetBaseline(env) {
   await Promise.all([
     env.STATE.delete(SNAPSHOT_KEY),
+    env.STATE.delete(HOT_KEY),
     env.STATE.delete(ERROR_KEY),
   ]);
   await writeMeta(env, {
@@ -214,72 +271,124 @@ async function writeMeta(env, patch) {
 }
 
 async function maybeHeartbeat(env, checkedAt) {
+  const now = new Date(checkedAt);
+  // Cron is exactly every five minutes; the scheduled event time passed by index.js
+  // makes :00 deterministic. This removes eleven of twelve steady-state META reads.
+  if (now.getUTCMinutes() !== 0) return;
   const meta = await readMeta(env);
   const last = new Date(meta.lastHeartbeatAt ?? 0).getTime();
-  const now = new Date(checkedAt).getTime();
-  if (Number.isFinite(last) && now - last < HEARTBEAT_MS) return;
+  if (Number.isFinite(last) && now.getTime() - last < HEARTBEAT_MS) return;
   await env.STATE.put(META_KEY, JSON.stringify({ ...meta, lastSuccessAt: checkedAt, lastHeartbeatAt: checkedAt }));
 }
 
+async function loadSnapshotIfNeeded(env, existing) {
+  return existing ?? readSnapshot(env);
+}
+
 export async function runWatch(env, { fetchImpl = fetch, now = new Date(), forceNotify = false } = {}) {
-  // Read the existing baseline before network fetches so HTTP validators can turn
-  // the steady-state path into two 304 responses and zero HTML parsing.
-  const [previous, previousError] = await Promise.all([
-    readSnapshot(env),
+  // HOT_KEY is a few hundred bytes and contains only validators/fingerprints. The
+  // large semantic snapshot is deliberately absent from the common 5-minute path.
+  let [hot, previousError] = await Promise.all([
+    readHot(env),
     env.STATE.get(ERROR_KEY, { type: "json" }),
   ]);
-  const collected = await collectSnapshot(env, fetchImpl, now, previous);
-  const { snapshot, optimization } = collected;
+  let previous = null;
+
+  // One-time migration / recovery path for deployments created before HOT_KEY.
+  if (!hot || hot.schema !== SNAPSHOT_SCHEMA) {
+    previous = await readSnapshot(env);
+    hot = hotFromSnapshot(previous);
+  }
+
+  const inspected = await inspectSources(env, fetchImpl, hot);
+  const optimization = inspected.optimization;
+  const sourceStateDirty = !hot || !sameHot(hot, inspected.hot);
+  const semanticDirty = !hot || inspected.go.changed || inspected.docs.changed;
+  const checkedAt = now.toISOString();
   const timeZone = env.TIMEZONE || "America/Chicago";
+
+  // Absolute hot path: both upstream semantic regions are proven identical. No
+  // 10KB semantic snapshot read, no HTML parser, no validation walk, no diff engine.
+  if (!semanticDirty && previous?.schema !== 1) {
+    if (sourceStateDirty) await writeHot(env, inspected.hot);
+
+    if (forceNotify || previousError) previous = await loadSnapshotIfNeeded(env, previous);
+    if (forceNotify && previous) {
+      const current = { ...previous, checkedAt, sourceState: inspected.hot.sourceState };
+      const manual = buildBootMessage(current, timeZone)
+        .replace("OPENCODE GO WATCH · ARMED", "OPENCODE GO WATCH · MANUAL CHECK")
+        .replace("Baseline captured. Semantic monitoring is live.", "No semantic changes detected. Current pages parse cleanly.");
+      await sendTelegram(env, manual, fetchImpl);
+    }
+    await maybeHeartbeat(env, checkedAt);
+
+    if (previousError && previous) {
+      const current = { ...previous, checkedAt, sourceState: inspected.hot.sourceState };
+      await sendTelegram(env, buildRecoveryMessage(previousError, current, timeZone), fetchImpl);
+      await env.STATE.delete(ERROR_KEY);
+      await writeMeta(env, { lastSuccessAt: checkedAt, lastRecoveryAt: checkedAt });
+    }
+
+    return { status: "unchanged", changes: [], snapshot: previous, optimization };
+  }
+
+  previous = await loadSnapshotIfNeeded(env, previous);
+  const snapshot = buildCandidate(previous, inspected, now);
 
   if (!previous) {
     const notifyBootstrap = String(env.NOTIFY_ON_BOOTSTRAP ?? "true").toLowerCase() !== "false";
     if (notifyBootstrap || forceNotify) await sendTelegram(env, buildBootMessage(snapshot, timeZone), fetchImpl);
+    // Full baseline first, hot pointer second. If the second write ever fails, the
+    // next invocation reconstructs HOT_KEY from the authoritative full baseline.
     await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    await writeHot(env, inspected.hot);
     await writeMeta(env, {
-      lastSuccessAt: snapshot.checkedAt,
-      lastHeartbeatAt: snapshot.checkedAt,
+      lastSuccessAt: checkedAt,
+      lastHeartbeatAt: checkedAt,
       lastChangeAt: null,
       lastChangeCount: 0,
-      bootstrappedAt: snapshot.checkedAt,
+      bootstrappedAt: checkedAt,
     });
     if (previousError) await env.STATE.delete(ERROR_KEY);
     return { status: "bootstrapped", changes: [], snapshot, optimization };
   }
 
-  let changes = [];
-  if (collected.semanticDirty) {
-    validateTransition(previous, snapshot);
-    changes = diffSnapshots(previous, snapshot);
-  }
+  validateTransition(previous, snapshot);
+  const changes = diffSnapshots(previous, snapshot);
+  const needsSchemaUpgrade = previous.schema !== SNAPSHOT_SCHEMA;
 
   if (changes.length) {
     const messages = buildChangeMessages(changes, snapshot, timeZone);
+    // Advance persistence only after every Telegram card succeeds; failed delivery
+    // therefore retries the same semantic diff on the next cron invocation.
     for (const message of messages) await sendTelegram(env, message, fetchImpl);
     await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    await writeHot(env, inspected.hot);
     await writeMeta(env, {
-      lastSuccessAt: snapshot.checkedAt,
-      lastHeartbeatAt: snapshot.checkedAt,
-      lastChangeAt: snapshot.checkedAt,
+      lastSuccessAt: checkedAt,
+      lastHeartbeatAt: checkedAt,
+      lastChangeAt: checkedAt,
       lastChangeCount: changes.length,
     });
   } else {
+    // A deployment can alter markup inside the watched region while leaving the
+    // semantic data identical. Persist just the tiny hot state; the large baseline
+    // is rewritten only for the one-time schema upgrade.
+    if (needsSchemaUpgrade) await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    if (sourceStateDirty || needsSchemaUpgrade) await writeHot(env, inspected.hot);
     if (forceNotify) {
       const manual = buildBootMessage(snapshot, timeZone)
         .replace("OPENCODE GO WATCH · ARMED", "OPENCODE GO WATCH · MANUAL CHECK")
         .replace("Baseline captured. Semantic monitoring is live.", "No semantic changes detected. Current pages parse cleanly.");
       await sendTelegram(env, manual, fetchImpl);
     }
-
-    // Persist new validators/fingerprints only if they actually changed. Normal
-    // five-minute checks therefore perform no snapshot KV write.
-    if (collected.sourceStateDirty) await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
-    await maybeHeartbeat(env, snapshot.checkedAt);
+    await maybeHeartbeat(env, checkedAt);
   }
 
   if (previousError) {
     await sendTelegram(env, buildRecoveryMessage(previousError, snapshot, timeZone), fetchImpl);
     await env.STATE.delete(ERROR_KEY);
+    await writeMeta(env, { lastSuccessAt: checkedAt, lastRecoveryAt: checkedAt });
   }
 
   return { status: changes.length ? "changed" : "unchanged", changes, snapshot, optimization };
