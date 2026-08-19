@@ -3,341 +3,38 @@ import { extractHtmlTables, extractSectionHtml, normalizeSpace, textContent } fr
 const MONEY = /^\$([\d.]+)$/;
 const INTEGER = /^-?\d+$/;
 const PROFILE_RE = /^([^\n]+?)\s*[—–-]\s*([\d,]+)\s+input,\s*([\d,]+)\s+cached,\s*([\d,]+)\s+output\s+tokens\s+per\s+request\s*$/gim;
-const ITEM_RE = /<span\b[^>]*\bdata-value(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>(?:\s|<!--[\s\S]*?-->)*<span\b[^>]*\bdata-name(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>(?:(?:\s|<!--[\s\S]*?-->)*<span\b[^>]*\bdata-bonus(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>)?/gi;
 const GRAPH_MARKER_RE = /\bdata-component\s*=\s*["']limit-graph["']/i;
-const PROMO_TEXT_RE = /usage\s+limits?/i;
-const LIMITED_TIME_RE = /limited\s+time/i;
-const MAX_PROMO_PREFIX = 96_000;
+const ITEM_START_RE = /<span\b[^>]*\bdata-item(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>/gi;
+const VALUE_RE = /<span\b[^>]*\bdata-value(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>/i;
+const NAME_RE = /<span\b[^>]*\bdata-name(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>/i;
+const BONUS_RE = /<span\b[^>]*\bdata-bonus(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>/i;
+const MAX_PROMO_PREFIX = 96000;
 
-function compactScalar(value) {
-  let source = String(value ?? "").trim();
-  if (source.includes("&")) source = normalizeSpace(source);
-  return source;
-}
-
-export function parseInteger(value) {
-  const s = compactScalar(value).replaceAll(",", "");
-  if (!INTEGER.test(s)) return null;
-  const n = Number.parseInt(s, 10);
-  return Number.isSafeInteger(n) ? n : null;
-}
-
-export function parseMoney(value) {
-  const source = compactScalar(value);
-  if (source === "-" || source === "—" || source === "") return null;
-  const match = MONEY.exec(source.replaceAll(",", ""));
-  return match ? Number(match[1]) : null;
-}
-
-function canonicalHeader(value) {
-  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-function findTable(tables, requiredHeaders) {
-  for (const rows of tables) {
-    const headers = rows[0] ?? [];
-    let matched = true;
-    for (const needle of requiredHeaders) {
-      let found = false;
-      for (const header of headers) {
-        if (canonicalHeader(header).includes(needle)) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        matched = false;
-        break;
-      }
-    }
-    if (matched) return rows;
-  }
-  return undefined;
-}
-
-function rowsToRequestMap(rows) {
-  const out = {};
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (row.length < 4) continue;
-    const requests5h = parseInteger(row[1]);
-    const requestsWeek = parseInteger(row[2]);
-    const requestsMonth = parseInteger(row[3]);
-    if (!row[0] || requests5h == null || requestsWeek == null || requestsMonth == null) continue;
-    out[row[0]] = { requests5h, requestsWeek, requestsMonth };
-  }
-  return out;
-}
-
-function rowsToPricingMap(rows) {
-  const out = {};
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (row.length < 6 || !row[0]) continue;
-    out[row[0]] = {
-      inputPerM: parseMoney(row[1]),
-      outputPerM: parseMoney(row[2]),
-      cachedReadPerM: parseMoney(row[3]),
-      cachedWritePerM: parseMoney(row[4]),
-      usageUsd: parseMoney(row[5]),
-    };
-  }
-  return out;
-}
-
-function parseLimits(sectionText) {
-  const fiveHour = /5\s*hour\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
-  const weekly = /weekly\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
-  const monthly = /monthly\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
-  const out = {};
-  if (fiveHour) out.fiveHourUsd = Number(fiveHour[1]);
-  if (weekly) out.weeklyUsd = Number(weekly[1]);
-  if (monthly) out.monthlyUsd = Number(monthly[1]);
-  return out;
-}
-
-export function canonicalModelKey(value) {
-  return normalizeSpace(value)
-    .replace(/\([^)]*\)\s*$/g, "")
-    .replace(/\bcode\b\s*$/i, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "");
-}
-
-function requestNameIndex(requestNames) {
-  const index = new Map();
-  for (const name of requestNames) index.set(canonicalModelKey(name), name);
-  return index;
-}
-
-function resolveProfileCandidate(candidate, index) {
-  const key = canonicalModelKey(candidate);
-  return key ? index.get(key) ?? null : null;
-}
-
-function expandProfileLabelIndexed(label, index) {
-  const clean = normalizeSpace(label).replace(/^[-*•]\s*/, "");
-  const parts = clean.split("/").map((part) => part.trim()).filter(Boolean);
-  if (parts.length === 1) return [resolveProfileCandidate(clean, index) ?? clean];
-
-  const first = parts[0];
-  const names = [];
-  const firstResolved = resolveProfileCandidate(first, index);
-  if (firstResolved) names.push(firstResolved);
-
-  const version = /^(.*?)(\d+(?:\.\d+)+(?:\s+.*)?)$/.exec(first);
-  const prefix = version?.[1] ?? "";
-
-  for (let i = 1; i < parts.length; i++) {
-    const part = parts[i];
-    let candidate = part;
-    if (prefix) {
-      const lead = /^([A-Za-z-]*)(\d.*)$/.exec(part);
-      candidate = lead && lead[1] && prefix.toLowerCase().endsWith(lead[1].toLowerCase())
-        ? `${prefix.slice(0, -lead[1].length)}${part}`
-        : `${prefix}${part}`;
-    }
-    const resolved = resolveProfileCandidate(candidate, index);
-    if (resolved) names.push(resolved);
-  }
-
-  return names.length ? [...new Set(names)] : [clean];
-}
-
-/** Expand grouped historical labels such as GLM-5.3/5.2/5.1. */
-export function expandProfileLabel(label, requestNames) {
-  return expandProfileLabelIndexed(label, requestNameIndex(requestNames));
-}
-
-function parseProfiles(sectionText, requestNames) {
-  const out = {};
-  const index = requestNameIndex(requestNames);
-  PROFILE_RE.lastIndex = 0;
-  let match;
-  while ((match = PROFILE_RE.exec(sectionText)) !== null) {
-    const inputTokens = parseInteger(match[2]);
-    const cachedTokens = parseInteger(match[3]);
-    const outputTokens = parseInteger(match[4]);
-    if (inputTokens == null || cachedTokens == null || outputTokens == null) continue;
-    const profile = { inputTokens, cachedTokens, outputTokens };
-    for (const model of expandProfileLabelIndexed(match[1], index)) out[model] = profile;
-  }
-  return out;
-}
-
-function normalizeChartName(rawName, explicitBonus) {
-  let name = normalizeSpace(rawName);
-  let bonus = explicitBonus ? normalizeSpace(explicitBonus) : null;
-  const embedded = /^(.*?)\s*\((\d+(?:\.\d+)?\s*[x×]\s*usage)\)\s*$/i.exec(name);
-  if (embedded) {
-    name = normalizeSpace(embedded[1]);
-    if (!bonus) bonus = normalizeSpace(embedded[2]).replace(/\s*[×]\s*/g, "x ").replace(/\s*x\s*/i, "x ");
-  }
-  return { name, bonus };
-}
-
-function parsePromoBannerText(pageText) {
-  const source = String(pageText ?? "");
-  const lines = source.split("\n");
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (line && PROMO_TEXT_RE.test(line) && LIMITED_TIME_RE.test(line)) return line.replace(/^New\s+/i, "");
-  }
-  const match = /(?:^|\n)New\s*\n?([^\n]{1,220}?(?:usage limits?|usage|limited time)[^\n]*)/i.exec(source);
-  return match ? normalizeSpace(match[1]) : null;
-}
-
-function graphSlice(source) {
-  const marker = GRAPH_MARKER_RE.exec(source);
-  if (!marker) return { chartHtml: source, chartStart: -1 };
-  const start = source.lastIndexOf("<figure", marker.index);
-  if (start < 0) return { chartHtml: source, chartStart: -1 };
-  const close = source.indexOf("</figure>", marker.index);
-  if (close < 0) return { chartHtml: source.slice(start), chartStart: start };
-  return { chartHtml: source.slice(start, close + 9), chartStart: start };
-}
-
-/**
- * Cheap pre-parser used by the watcher before SHA-256 fingerprinting. It limits
- * downstream work to the graph and the small prefix where OpenCode renders the
- * promotional banner, rather than repeatedly stripping the entire landing page.
- */
-export function prepareGoPage(html) {
-  const source = String(html ?? "");
-  const { chartHtml, chartStart } = graphSlice(source);
-  const prefixEnd = chartStart >= 0 ? chartStart : source.length;
-  const prefixStart = Math.max(0, prefixEnd - MAX_PROMO_PREFIX);
-  const promoText = textContent(source.slice(prefixStart, prefixEnd));
-  const promoBanner = parsePromoBannerText(promoText);
-  return {
-    chartHtml,
-    promoBanner,
-    fingerprintSource: `${chartHtml}\n<!--promo:${promoBanner ?? ""}-->`,
-  };
-}
-
-export function parsePreparedGoPage(prepared) {
-  const chart = {};
-  ITEM_RE.lastIndex = 0;
-  let match;
-  while ((match = ITEM_RE.exec(prepared.chartHtml)) !== null) {
-    const requests5h = parseInteger(textContent(match[1]));
-    const normalized = normalizeChartName(textContent(match[2]), match[3] ? textContent(match[3]) : null);
-    if (!normalized.name || requests5h == null) continue;
-    chart[normalized.name] = { requests5h, bonus: normalized.bonus };
-  }
-
-  if (!Object.keys(chart).length) {
-    const chartText = textContent(prepared.chartHtml);
-    const regionMatch = /Go\s+1x[\s\S]{0,5000}?Requests per 5 hour/i.exec(chartText);
-    const region = regionMatch?.[0] ?? chartText;
-    const rowPattern = /([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9().×x-]+){0,6})(?=\s+[\d,]+\s+[A-Z]|\s+\d+(?:\.\d+)?[x×]\s+usage|\s+Requests per 5 hour)/g;
-    let row;
-    while ((row = rowPattern.exec(region)) !== null) {
-      const requests5h = parseInteger(row[1]);
-      const normalized = normalizeChartName(row[2], null);
-      if (requests5h != null && normalized.name) chart[normalized.name] = { requests5h, bonus: normalized.bonus };
-    }
-    const bonusMatch = /([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9.-]+){0,5})\s+(\d+(?:\.\d+)?[x×]\s+usage)\s+Requests per 5 hour/i.exec(region);
-    if (bonusMatch) {
-      const requests5h = parseInteger(bonusMatch[1]);
-      const normalized = normalizeChartName(bonusMatch[2], bonusMatch[3]);
-      if (requests5h != null) chart[normalized.name] = { requests5h, bonus: normalized.bonus };
-    }
-  }
-
-  if (!Object.keys(chart).length) throw new Error("Go page parser found no chart models");
-  return { chart, promoBanner: prepared.promoBanner };
-}
-
-export function parseGoPage(html) {
-  return parsePreparedGoPage(prepareGoPage(html));
-}
-
-function extractUsageNotes(usageText) {
-  const notes = {};
-  const peak = /DeepSeek[^.\n]*Peak hours[^.\n]*\.?/i.exec(usageText);
-  if (peak) notes.deepSeekPeakHours = normalizeSpace(peak[0]);
-  const mutable = /Usage limits may change[^.\n]*\.?/i.exec(usageText);
-  if (mutable) notes.limitsDisclaimer = normalizeSpace(mutable[0]);
-  return notes;
-}
-
-export function prepareDocsPage(html) {
-  const source = String(html ?? "");
-  const usageHtml = extractSectionHtml(source, "Usage\\s+limits") || source;
-  return { usageHtml, fingerprintSource: usageHtml };
-}
-
-export function parsePreparedDocsPage(prepared) {
-  const usageText = textContent(prepared.usageHtml);
-  const tables = extractHtmlTables(prepared.usageHtml);
-  const requestTable = findTable(tables, ["model", "requests per 5 hour", "requests per week", "requests per month"]);
-  const pricingTable = findTable(tables, ["model", "input", "output", "cached read", "usage"]);
-
-  if (!requestTable) throw new Error("Docs parser could not find request-count table");
-  if (!pricingTable) throw new Error("Docs parser could not find pricing table");
-
-  const limits = parseLimits(usageText);
-  const requests = rowsToRequestMap(requestTable);
-  const pricing = rowsToPricingMap(pricingTable);
-  const profiles = parseProfiles(usageText, Object.keys(requests));
-  const notes = extractUsageNotes(usageText);
-
-  if (Object.keys(limits).length !== 3) throw new Error("Docs parser could not parse all three dollar limits");
-  if (!Object.keys(requests).length) throw new Error("Docs parser request-count table was empty");
-  if (!Object.keys(pricing).length) throw new Error("Docs parser pricing table was empty");
-  if (!Object.keys(profiles).length) throw new Error("Docs parser request profiles were empty");
-
-  return {
-    limits,
-    requests,
-    pricing,
-    profiles,
-    notes,
-    usageText: usageText.replace(/\s+/g, " ").trim(),
-  };
-}
-
-export function parseDocsPage(html) {
-  return parsePreparedDocsPage(prepareDocsPage(html));
-}
-
-export function parseBonusMultiplier(value) {
-  const match = /^(\d+(?:\.\d+)?)\s*[x×]\s*usage$/i.exec(normalizeSpace(value));
-  return match ? Number(match[1]) : null;
-}
-
-export function parsePromoDescriptor(value) {
-  const text = normalizeSpace(value);
-  if (!text) return null;
-  const multiplier = /(\d+(?:\.\d+)?)\s*[x×]\s*(?:higher\s+)?usage(?:\s+limits?)?/i.exec(text);
-  if (!multiplier) return null;
-  const prefix = text.slice(0, multiplier.index).replace(/\s+(?:gets?|has|receives?|offers?)\s*$/i, "").trim();
-  if (!prefix) return null;
-  return { model: prefix, multiplier: Number(multiplier[1]) };
-}
-
-export function deriveConsistency(go, docs) {
-  const out = {};
-  const bannerPromo = parsePromoDescriptor(go.promoBanner);
-  for (const [name, chart] of Object.entries(go.chart ?? {})) {
-    const doc = docs.requests?.[name];
-    if (!doc) {
-      out[name] = { status: "chart_only", chart: chart.requests5h, docs: null };
-      continue;
-    }
-    if (chart.requests5h === doc.requests5h) {
-      out[name] = { status: "match", chart: chart.requests5h, docs: doc.requests5h };
-      continue;
-    }
-    let multiplier = parseBonusMultiplier(chart.bonus);
-    if (!multiplier && bannerPromo && canonicalModelKey(bannerPromo.model) === canonicalModelKey(name)) multiplier = bannerPromo.multiplier;
-    if (multiplier && Math.round(doc.requests5h * multiplier) === chart.requests5h) {
-      out[name] = { status: "promotion", chart: chart.requests5h, docs: doc.requests5h, multiplier };
-      continue;
-    }
-    out[name] = { status: "mismatch", chart: chart.requests5h, docs: doc.requests5h };
-  }
-  return out;
-}
+function compactScalar(value){let s=String(value??"").trim();if(s.includes("&"))s=normalizeSpace(s);return s;}
+export function parseInteger(value){const s=compactScalar(value).replaceAll(",","");if(!INTEGER.test(s))return null;const n=Number.parseInt(s,10);return Number.isSafeInteger(n)?n:null;}
+export function parseMoney(value){const s=compactScalar(value);if(!s||s==="-"||s==="—")return null;const m=MONEY.exec(s.replaceAll(",",""));return m?Number(m[1]):null;}
+function canonicalHeader(value){return String(value??"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();}
+function findTable(tables,required){for(const rows of tables){const hs=(rows[0]??[]).map(canonicalHeader);if(required.every((n)=>hs.some((h)=>h.includes(n))))return rows;}return undefined;}
+function rowsToRequestMap(rows){const out={};for(let i=1;i<rows.length;i++){const r=rows[i];if(r.length<4)continue;const a=parseInteger(r[1]),b=parseInteger(r[2]),c=parseInteger(r[3]);if(r[0]&&a!=null&&b!=null&&c!=null)out[r[0]]={requests5h:a,requestsWeek:b,requestsMonth:c};}return out;}
+function rowsToPricingMap(rows){const out={};for(let i=1;i<rows.length;i++){const r=rows[i];if(r.length<6||!r[0])continue;out[r[0]]={inputPerM:parseMoney(r[1]),outputPerM:parseMoney(r[2]),cachedReadPerM:parseMoney(r[3]),cachedWritePerM:parseMoney(r[4]),usageUsd:parseMoney(r[5])};}return out;}
+function parseLimits(text){const out={};const a=/5\s*hour\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(text),b=/weekly\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(text),c=/monthly\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(text);if(a)out.fiveHourUsd=Number(a[1]);if(b)out.weeklyUsd=Number(b[1]);if(c)out.monthlyUsd=Number(c[1]);return out;}
+export function canonicalModelKey(value){return normalizeSpace(value).replace(/\([^)]*\)\s*$/g,"").replace(/\bcode\b\s*$/i,"").toLowerCase().replace(/[^a-z0-9]+/g,"");}
+function requestNameIndex(names){const m=new Map();for(const n of names)m.set(canonicalModelKey(n),n);return m;}
+export function expandProfileLabel(label,names){const idx=requestNameIndex(names),clean=normalizeSpace(label).replace(/^[-*•]\s*/,""),parts=clean.split("/").map((x)=>x.trim()).filter(Boolean);if(parts.length===1)return[idx.get(canonicalModelKey(clean))??clean];const first=parts[0],out=[],r0=idx.get(canonicalModelKey(first));if(r0)out.push(r0);const vm=/^(.*?)(\d+(?:\.\d+)+(?:\s+.*)?)$/.exec(first),prefix=vm?.[1]??"";for(const p of parts.slice(1)){let c=p;if(prefix){const lead=/^([A-Za-z-]*)(\d.*)$/.exec(p);c=lead&&lead[1]&&prefix.toLowerCase().endsWith(lead[1].toLowerCase())?`${prefix.slice(0,-lead[1].length)}${p}`:`${prefix}${p}`;}const r=idx.get(canonicalModelKey(c));if(r)out.push(r);}return out.length?[...new Set(out)]:[clean];}
+function parseProfiles(text,names){const out={};PROFILE_RE.lastIndex=0;let m;while((m=PROFILE_RE.exec(text))!==null){const a=parseInteger(m[2]),b=parseInteger(m[3]),c=parseInteger(m[4]);if(a==null||b==null||c==null)continue;const p={inputTokens:a,cachedTokens:b,outputTokens:c};for(const n of expandProfileLabel(m[1],names))out[n]=p;}return out;}
+function normalizeChartName(raw,bonus){let name=normalizeSpace(raw),b=bonus?normalizeSpace(bonus):null;const m=/^(.*?)\s*\((\d+(?:\.\d+)?\s*[x×]\s*usage)\)\s*$/i.exec(name);if(m){name=normalizeSpace(m[1]);if(!b)b=normalizeSpace(m[2]).replace(/×/g,"x");}return{name,bonus:b};}
+function parsePromoBannerText(text){for(const raw of String(text??"").split("\n")){const line=raw.trim();if(line&&/usage\s+limits?/i.test(line)&&/limited\s+time/i.test(line))return line.replace(/^New\s+/i,"");}return null;}
+function graphSlice(source){const marker=GRAPH_MARKER_RE.exec(source);if(!marker)return{chartHtml:source,chartStart:-1};const start=source.lastIndexOf("<figure",marker.index),close=source.indexOf("</figure>",marker.index);return{chartHtml:start<0?source:source.slice(start,close<0?undefined:close+9),chartStart:start};}
+export function prepareGoPage(html){const source=String(html??""),g=graphSlice(source),end=g.chartStart>=0?g.chartStart:source.length,start=Math.max(0,end-MAX_PROMO_PREFIX),promoBanner=parsePromoBannerText(textContent(source.slice(start,end)));return{chartHtml:g.chartHtml,promoBanner,fingerprintSource:`${g.chartHtml}\n<!--promo:${promoBanner??""}-->`};}
+function parseItemSegment(segment,chart){const v=VALUE_RE.exec(segment),n=NAME_RE.exec(segment);if(!v||!n)return;const b=BONUS_RE.exec(segment),requests5h=parseInteger(textContent(v[1])),z=normalizeChartName(textContent(n[1]),b?textContent(b[1]):null);if(requests5h!=null&&z.name)chart[z.name]={requests5h,bonus:z.bonus};}
+function parseChartItems(html,chart){const starts=[];ITEM_START_RE.lastIndex=0;let m;while((m=ITEM_START_RE.exec(html))!==null)starts.push(m.index);for(let i=0;i<starts.length;i++)parseItemSegment(html.slice(starts[i],i+1<starts.length?starts[i+1]:html.length),chart);}
+function parseChartText(html,chart){const text=textContent(html),region=/Go\s+1x[\s\S]{0,8000}?Requests per 5 hour/i.exec(text)?.[0]??text,re=/([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9().×x-]+){0,8}?)(?=\s+[\d,]+\s+[A-Z]|\s+\d+(?:\.\d+)?[x×]\s+usage|\s+Requests per 5 hour)/g;let m;while((m=re.exec(region))!==null){const requests5h=parseInteger(m[1]),z=normalizeChartName(m[2],null);if(requests5h!=null&&z.name)chart[z.name]={requests5h,bonus:z.bonus};}const b=/([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9.-]+){0,8})\s+(\d+(?:\.\d+)?[x×]\s+usage)/i.exec(region);if(b){const requests5h=parseInteger(b[1]),z=normalizeChartName(b[2],b[3]);if(requests5h!=null)chart[z.name]={requests5h,bonus:z.bonus};}}
+export function parsePreparedGoPage(prepared){const chart={};parseChartItems(prepared.chartHtml,chart);if(Object.keys(chart).length<5)parseChartText(prepared.chartHtml,chart);if(!Object.keys(chart).length)throw new Error("Go page parser found no chart models");return{chart,promoBanner:prepared.promoBanner};}
+export function parseGoPage(html){return parsePreparedGoPage(prepareGoPage(html));}
+function extractUsageNotes(text){const out={},a=/DeepSeek[^.\n]*Peak hours[^.\n]*\.?/i.exec(text),b=/Usage limits may change[^.\n]*\.?/i.exec(text);if(a)out.deepSeekPeakHours=normalizeSpace(a[0]);if(b)out.limitsDisclaimer=normalizeSpace(b[0]);return out;}
+export function prepareDocsPage(html){const source=String(html??""),usageHtml=extractSectionHtml(source,"Usage\\s+limits")||source;return{usageHtml,fingerprintSource:usageHtml};}
+export function parsePreparedDocsPage(prepared){const usageText=textContent(prepared.usageHtml),tables=extractHtmlTables(prepared.usageHtml),requestTable=findTable(tables,["model","requests per 5 hour","requests per week","requests per month"]),pricingTable=findTable(tables,["model","input","output","cached read","usage"]);if(!requestTable)throw new Error("Docs parser could not find request-count table");if(!pricingTable)throw new Error("Docs parser could not find pricing table");const requests=rowsToRequestMap(requestTable),out={limits:parseLimits(usageText),requests,pricing:rowsToPricingMap(pricingTable),profiles:parseProfiles(usageText,Object.keys(requests)),notes:extractUsageNotes(usageText),usageText:usageText.replace(/\s+/g," ").trim()};if(Object.keys(out.limits).length!==3)throw new Error("Docs parser could not parse all three dollar limits");if(!Object.keys(out.requests).length)throw new Error("Docs parser request-count table was empty");if(!Object.keys(out.pricing).length)throw new Error("Docs parser pricing table was empty");if(!Object.keys(out.profiles).length)throw new Error("Docs parser request profiles were empty");return out;}
+export function parseDocsPage(html){return parsePreparedDocsPage(prepareDocsPage(html));}
+export function parseBonusMultiplier(value){const m=/^(\d+(?:\.\d+)?)\s*[x×]\s*usage$/i.exec(normalizeSpace(value));return m?Number(m[1]):null;}
+export function parsePromoDescriptor(value){const text=normalizeSpace(value);if(!text)return null;const m=/(\d+(?:\.\d+)?)\s*[x×]\s*(?:higher\s+)?usage(?:\s+limits?)?/i.exec(text);if(!m)return null;const model=text.slice(0,m.index).replace(/\s+(?:gets?|has|receives?|offers?)\s*$/i,"").trim();return model?{model,multiplier:Number(m[1])}:null;}
+export function deriveConsistency(go,docs){const out={},bp=parsePromoDescriptor(go.promoBanner);for(const[name,c]of Object.entries(go.chart??{})){const d=docs.requests?.[name];if(!d){out[name]={status:"chart_only",chart:c.requests5h,docs:null};continue;}if(c.requests5h===d.requests5h){out[name]={status:"match",chart:c.requests5h,docs:d.requests5h};continue;}let m=parseBonusMultiplier(c.bonus);if(!m&&bp&&canonicalModelKey(bp.model)===canonicalModelKey(name))m=bp.multiplier;out[name]=m&&Math.round(d.requests5h*m)===c.requests5h?{status:"promotion",chart:c.requests5h,docs:d.requests5h,multiplier:m}:{status:"mismatch",chart:c.requests5h,docs:d.requests5h};}return out;}
