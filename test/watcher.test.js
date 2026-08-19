@@ -8,9 +8,11 @@ const docsHtml = await readFile(new URL("./fixtures/docs.html", import.meta.url)
 
 class FakeKV {
   map = new Map();
+  reads = [];
   writes = [];
   deletes = [];
   async get(key, opts) {
+    this.reads.push(key);
     const value = this.map.get(key);
     if (value == null) return null;
     return opts?.type === "json" ? JSON.parse(value) : value;
@@ -137,4 +139,91 @@ test("catastrophic parser shrink is rejected instead of announcing mass removals
     /chart parser found 1 models/,
   );
   assert.equal(Object.keys((await readSnapshot(e)).go.chart).length, 11);
+});
+
+test("steady-state conditional requests hit the 304 zero-parse fast path", async () => {
+  const e = env();
+  const telegram = [];
+  const seen = [];
+  let initialized = false;
+  const fetchImpl = async (url, init = {}) => {
+    if (String(url).startsWith("https://api.telegram.org/")) {
+      if (init.body) telegram.push(JSON.parse(init.body));
+      return new Response('{"ok":true,"result":{}}', { status: 200 });
+    }
+    const isGo = url === "https://opencode.ai/go";
+    const etag = isGo ? '"go-v1"' : '"docs-v1"';
+    seen.push({ url, headers: init.headers });
+    if (initialized && init.headers?.["if-none-match"] === etag) {
+      return new Response(null, { status: 304, headers: { etag } });
+    }
+    return new Response(isGo ? goHtml : docsHtml, { status: 200, headers: { etag } });
+  };
+
+  const first = await runWatch(e, { fetchImpl, now: new Date("2026-08-19T18:00:00Z") });
+  assert.equal(first.optimization.go, "parsed");
+  assert.equal(first.optimization.docs, "parsed");
+  initialized = true;
+  const writes = e.STATE.writes.length;
+  e.STATE.reads.length = 0;
+
+  const second = await runWatch(e, { fetchImpl, now: new Date("2026-08-19T18:05:00Z") });
+  assert.deepEqual(second.optimization, { go: "304", docs: "304" });
+  assert.equal(second.status, "unchanged");
+  assert.equal(e.STATE.writes.length, writes);
+  assert.equal(e.STATE.reads.includes("snapshot:v1"), false, "hot path must not load the full semantic snapshot");
+  assert.equal(seen.at(-2).headers["if-none-match"], '"go-v1"');
+  assert.equal(seen.at(-1).headers["if-none-match"], '"docs-v1"');
+});
+
+test("matching ETag on a 200 response bypasses body decoding and parsing", async () => {
+  const e = env();
+  let initialized = false;
+  const fetchImpl = async (url, init = {}) => {
+    if (String(url).startsWith("https://api.telegram.org/")) return new Response('{"ok":true,"result":{}}', { status: 200 });
+    const isGo = url === "https://opencode.ai/go";
+    const etag = isGo ? '"go-v1"' : '"docs-v1"';
+    if (initialized && init.headers?.["if-none-match"] === etag) {
+      return new Response("this body is deliberately not valid monitored HTML", { status: 200, headers: { etag } });
+    }
+    return new Response(isGo ? goHtml : docsHtml, { status: 200, headers: { etag } });
+  };
+  await runWatch(e, { fetchImpl, now: new Date("2026-08-19T18:00:00Z") });
+  initialized = true;
+  const result = await runWatch(e, { fetchImpl, now: new Date("2026-08-19T18:05:00Z") });
+  assert.deepEqual(result.optimization, { go: "etag", docs: "etag" });
+  assert.equal(result.status, "unchanged");
+});
+
+test("identical semantic regions skip parsers even when the origin does not support validators", async () => {
+  const e = env();
+  await runWatch(e, { fetchImpl: makeFetch(), now: new Date("2026-08-19T18:00:00Z") });
+  const result = await runWatch(e, { fetchImpl: makeFetch(), now: new Date("2026-08-19T18:05:00Z") });
+  assert.deepEqual(result.optimization, { go: "fingerprint", docs: "fingerprint" });
+  assert.equal(result.status, "unchanged");
+});
+
+test("unrelated page chrome changes are ignored before semantic parsing", async () => {
+  const e = env();
+  await runWatch(e, { fetchImpl: makeFetch(), now: new Date("2026-08-19T18:00:00Z") });
+  const noisyGo = goHtml.replace("</body>", `<aside>${"unrelated navigation ".repeat(2_000)}</aside></body>`);
+  const noisyDocs = docsHtml.replace("<p>Other section.</p>", `<p>Other section changed.</p><aside>${"unrelated docs chrome ".repeat(2_000)}</aside>`);
+  const result = await runWatch(e, {
+    fetchImpl: makeFetch({ go: noisyGo, docs: noisyDocs }),
+    now: new Date("2026-08-19T18:05:00Z"),
+  });
+  assert.deepEqual(result.optimization, { go: "fingerprint", docs: "fingerprint" });
+  assert.equal(result.status, "unchanged");
+});
+
+test("only the changed surface is reparsed", async () => {
+  const e = env();
+  await runWatch(e, { fetchImpl: makeFetch(), now: new Date("2026-08-19T18:00:00Z") });
+  const changedDocs = docsHtml.replace("<td>2,050</td><td>5,100</td><td>10,250</td>", "<td>2,300</td><td>5,750</td><td>11,500</td>");
+  const result = await runWatch(e, {
+    fetchImpl: makeFetch({ docs: changedDocs }),
+    now: new Date("2026-08-19T18:05:00Z"),
+  });
+  assert.deepEqual(result.optimization, { go: "fingerprint", docs: "parsed" });
+  assert.equal(result.status, "changed");
 });
