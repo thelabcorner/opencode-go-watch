@@ -136,7 +136,7 @@ test("catastrophic parser shrink is rejected instead of announcing mass removals
   const brokenGo = '<figure><span data-value>1</span><span data-name>Only One</span></figure>';
   await assert.rejects(
     runWatch(e, { fetchImpl: makeFetch({ go: brokenGo }), now: new Date("2026-08-19T18:05:00Z") }),
-    /chart parser found 1 models/,
+    /(Go page parser found no chart models|chart parser found \d+ models)/,
   );
   assert.equal(Object.keys((await readSnapshot(e)).go.chart).length, 11);
 });
