@@ -2,6 +2,7 @@ name = "opencode-go-watch"
 main = "src/index.js"
 compatibility_date = "2026-08-19"
 workers_dev = true
+keep_vars = true
 
 [triggers]
 crons = ["*/5 * * * *"]
@@ -13,6 +14,7 @@ TIMEZONE = "America/Chicago"
 NOTIFY_ON_BOOTSTRAP = "true"
 
 # Wrangler 4 automatic resource provisioning creates and binds this namespace
-# on first remote deploy. Deliberately omit an account-specific namespace ID.
+# on first remote deploy. Cloudflare keeps the provisioned namespace linked on
+# future deploys even when its ID is not committed to the repository.
 [[kv_namespaces]]
 binding = "STATE"
