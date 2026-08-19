@@ -27,17 +27,27 @@ The baseline is only advanced after a notification succeeds, so a temporary Tele
 Cloudflare Cron (*/5 min)
         |
         v
-  Worker fetches both pages
+ read ~300 B hot state from KV
         |
         v
- semantic parsers + validation
+ conditional fetches (ETag / Last-Modified)
         |
-        +---- parse/fetch failure ---> operational Telegram alert
+        +---- 304 / same ETag ----> unchanged; no body decode, parser, snapshot read, or diff
         |
         v
-     semantic diff
+ watched-region SHA-256
         |
-  unchanged -> stop
+        +---- same fingerprint ---> unchanged; no semantic parser or diff
+        |
+        v
+ parse only changed surface(s)
+        |
+        +---- parse/fetch failure ---> preserve baseline + operational Telegram alert
+        |
+        v
+ read full semantic baseline + validate + diff
+        |
+  semantically unchanged -> update tiny hot state only
         |
      changed
         |
@@ -45,9 +55,24 @@ Cloudflare Cron (*/5 min)
  rich Telegram notification
         |
         v
-  persist new snapshot in KV
+ persist semantic baseline, then hot state
 ```
 
+
+## Hot-path optimization
+
+The steady-state path is designed specifically around Cloudflare Free's tight CPU budget:
+
+1. A dedicated KV hot record stores only source validators and fingerprints (roughly a few hundred bytes). Normal five-minute checks do **not** read the much larger semantic snapshot.
+2. Requests send `If-None-Match` or `If-Modified-Since`. A `304 Not Modified` reuses the baseline with **zero response-body decoding, HTML parsing, validation walking, or semantic diffing**.
+3. If a CDN returns `200` with the exact same ETag, the response body is cancelled immediately and treated as unchanged.
+4. If the origin provides no useful validator, only the monitored regions are extracted and hashed with native `crypto.subtle` SHA-256. An identical fingerprint skips the semantic parsers and diff engine.
+5. If only one surface changes, only that surface is parsed; the unchanged Go/docs half is reused directly.
+6. The Go parser scans the graph figure instead of the whole landing page. The docs parser slices directly to `#usage-limits` before table/text parsing.
+7. Stable runs do not rewrite the large semantic snapshot. Raw markup/validator churn with identical semantics updates only the tiny hot record. Operational heartbeat metadata is touched only once per hour.
+8. Regexes and number/date formatters are compiled/cached at module scope, and grouped-model profile lookup uses a prebuilt canonical-name index rather than repeated scans.
+
+The repository includes `npm run bench` as a repeatable microbenchmark. Representative Node 22 runs on the captured production-shaped fixtures measured roughly **0.02–0.05 ms/run on the 304 hot path**, **~0.3–0.8 ms/run on the no-validator fingerprint fallback**, **~0.49–0.61 ms for both semantic parsers combined**, and **~0.02–0.03 ms to render a seven-field Telegram change card**. These are local wall-clock microbenchmarks with fake KV/fetch, not Cloudflare billed CPU measurements; production Worker CPU metrics remain the source of truth after deployment.
 
 ## Parser resilience
 
@@ -146,6 +171,7 @@ The core has no runtime dependencies and is tested with Node's built-in test run
 npm test
 npm run test:coverage
 npm run check
+npm run bench
 ```
 
 Fixtures reflect the OpenCode values observed on 2026-08-19, including the Hy3 chart promotion (`34,400` chart vs `4,300` docs base, `8x usage`).
