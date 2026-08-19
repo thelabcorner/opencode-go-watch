@@ -24,15 +24,31 @@ Regression coverage was designed from real change shapes in the OpenCode reposit
 - request estimate, pricing, request-profile, and global allowance changes
 - harmless DOM/table row reordering
 
+## Performance validation
+
+The watcher now has three steady-state gates before semantic parsing: conditional `304`, exact ETag identity on a `200`, and SHA-256 fingerprinting of only the monitored regions. A dedicated hot KV record (roughly a few hundred bytes) means normal checks avoid loading the ~10 KB captured semantic snapshot entirely. Only changed surfaces are parsed.
+
+Development microbenchmark (`npm run bench`, Node 22, captured production-shaped fixtures):
+
+- conditional `304` hot path: ~0.02–0.05 ms/run
+- no-validator fingerprint fallback: typically ~0.3–0.8 ms/run
+- Go + docs semantic parsers combined: ~0.49–0.61 ms
+- seven-field rich Telegram render: ~0.02–0.03 ms
+
+These timings are local wall-clock microbenchmarks using fake KV/fetch and intentionally are not presented as Cloudflare billed CPU time. Production Cloudflare Worker CPU metrics must be checked after deployment.
+
+Regression tests explicitly verify `304`, same-ETag `200`, fingerprint fallback, unrelated-page-chrome immunity, changed-surface-only parsing, and that the 304 hot path does not read the full semantic snapshot.
+
 ## Local verification
 
-The project has no runtime npm dependencies. The validation suite exercises parsing, semantic diffing, historical regressions, Telegram rendering/API payloads, retry semantics, parser circuit breakers, and HTTP/admin endpoints.
+The project has no runtime npm dependencies. The current suite passes 37/37 tests and exercises parsing, semantic diffing, historical regressions, Telegram rendering/API payloads, retry semantics, parser circuit breakers, and HTTP/admin endpoints.
 
 Run:
 
 ```bash
 npm run validate
 npm run test:coverage
+npm run bench
 ```
 
 The bot token and admin token are never committed and must be installed as Cloudflare Worker secrets.
