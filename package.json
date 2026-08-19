@@ -15,10 +15,20 @@
     "typecheck": "tsc --allowJs --checkJs --noEmit --target ES2023 --module ESNext --moduleResolution Bundler --lib ES2023,DOM --skipLibCheck src/*.js"
   },
   "devDependencies": {
-    "wrangler": "^4.0.0",
+    "wrangler": "^4.102.0",
     "typescript": "^5.8.3"
   },
   "engines": {
     "node": ">=20"
+  },
+  "cloudflare": {
+    "bindings": {
+      "TELEGRAM_BOT_TOKEN": {
+        "description": "Telegram Bot API token. Store as an encrypted Worker secret; never commit it."
+      },
+      "ADMIN_TOKEN": {
+        "description": "Long random secret protecting /status, /check, /telegram/setup, and baseline controls."
+      }
+    }
   }
 }

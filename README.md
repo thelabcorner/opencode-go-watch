@@ -48,6 +48,7 @@ Cloudflare Cron (*/5 min)
   persist new snapshot in KV
 ```
 
+
 ## Parser resilience
 
 The parser is intentionally shaped around change patterns seen in OpenCode Go history, not a one-off snapshot. Regression tests cover:
@@ -79,20 +80,23 @@ Prerequisites: Node 20+ and a Cloudflare account.
 ```bash
 npm install
 npx wrangler login
-npx wrangler kv namespace create OPENCODE_GO_WATCH_STATE
-```
-
-Copy the returned namespace ID into `wrangler.toml` as the `STATE` binding, then:
-
-```bash
-npx wrangler secret put TELEGRAM_BOT_TOKEN
-npx wrangler secret put ADMIN_TOKEN
 npm run validate
 npm run test:coverage
 npm run deploy
 ```
 
+Wrangler 4 automatically provisions and binds the `STATE` KV namespace because the binding is declared without an account-specific ID. Then add the two runtime secrets:
+
+```bash
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put ADMIN_TOKEN
+```
+
 The Worker is configured for `*/5 * * * *`. Cloudflare Cron uses UTC, but this cadence is timezone-independent.
+
+### Deploy from the existing GitHub repository
+
+In Cloudflare Workers, choose **Import a repository**, select `thelabcorner/opencode-go-watch`, use `main`, and keep the default deploy command `npx wrangler deploy`. The KV binding is automatically provisioned on first deploy. After that, add `TELEGRAM_BOT_TOKEN` and `ADMIN_TOKEN` under **Settings → Variables & Secrets** as encrypted secrets, then redeploy.
 
 ### Connect Telegram without manually finding chat ID
 
