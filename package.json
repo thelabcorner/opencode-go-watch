@@ -7,12 +7,13 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:coverage": "node --test --experimental-test-coverage test/*.test.js",
-    "check": "for f in src/*.js test/*.test.js; do node --check \"$f\" || exit 1; done",
+    "check": "for f in src/*.js test/*.test.js bench/*.mjs; do node --check \"$f\" || exit 1; done",
     "validate": "npm run check && npm run typecheck && npm test",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "cf:types": "wrangler types",
-    "typecheck": "tsc --allowJs --checkJs --noEmit --target ES2023 --module ESNext --moduleResolution Bundler --lib ES2023,DOM --skipLibCheck src/*.js"
+    "typecheck": "tsc --allowJs --checkJs --noEmit --target ES2023 --module ESNext --moduleResolution Bundler --lib ES2023,DOM --skipLibCheck src/*.js",
+    "bench": "node bench/perf.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.102.0",
