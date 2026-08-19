@@ -51,7 +51,7 @@ async function manualCheck(request, env, forceNotify = false) {
   if (guard) return guard;
   try {
     const result = await runWatch(env, { forceNotify });
-    return json({ status: result.status, changes: result.changes });
+    return json({ status: result.status, changes: result.changes, optimization: result.optimization });
   } catch (error) {
     const failure = await recordFailure(env, error);
     return json(failure, 502);
@@ -125,7 +125,7 @@ export default {
     ctx.waitUntil((async () => {
       try {
         const result = await runWatch(env);
-        console.log(JSON.stringify({ event: "watch.complete", status: result.status, changes: result.changes.length }));
+        console.log(JSON.stringify({ event: "watch.complete", status: result.status, changes: result.changes.length, optimization: result.optimization }));
       } catch (error) {
         console.error("watch failed", error);
         await recordFailure(env, error);
