@@ -47,3 +47,28 @@ test("does not emit an unclassified fallback for presentation-only markup churn"
   const after = { ...structuredClone(before), go: parseGoPage(noisyHtml), checkedAt: "2026-08-19T18:05:00.000Z" };
   assert.deepEqual(diffSnapshots(before, after), []);
 });
+
+test("equivalent limited-regions markup variants are semantically silent", () => {
+  const before = snap();
+  const after = structuredClone(before);
+  const policy = "https://ai.developer.meta.com/legal/geographic-use-policy";
+  before.go.monitorStructure += `\n<a data-regions href="${policy}"> (limited regions) </a>`;
+  after.go.monitorStructure += `\n<span data-regions> ( <a href="${policy}"> limited regions </a> ) </span>`;
+  after.checkedAt = "2026-08-19T18:05:00.000Z";
+  assert.deepEqual(diffSnapshots(before, after), []);
+});
+
+test("real limited-regions policy changes still surface through the fallback", () => {
+  const before = snap();
+  const after = structuredClone(before);
+  before.go.monitorStructure += '\n<a data-regions href="https://example.com/policy-a"> (limited regions) </a>';
+  after.go.monitorStructure += '\n<span data-regions> ( <a href="https://example.com/policy-b"> limited regions </a> ) </span>';
+  after.checkedAt = "2026-08-19T18:05:00.000Z";
+
+  const changes = diffSnapshots(before, after);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].type, "unclassified_source_change");
+  assert.equal(changes[0].source, "go");
+  assert.match(changes[0].before, /policy-a/);
+  assert.match(changes[0].after, /policy-b/);
+});
