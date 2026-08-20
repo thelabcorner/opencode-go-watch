@@ -24,6 +24,15 @@ const DOCS_CHANGE_TYPES = new Set([
   "usage_copy_changed",
 ]);
 
+// OpenCode has rendered the same regional-availability annotation in multiple
+// equivalent shapes, e.g. either the anchor itself carries data-regions or a
+// wrapper span does. Collapse those known-equivalent forms before the generic
+// unknown-change residual diff so SSR/template churn does not become an alert.
+// Keep the policy URL in the canonical token: a real URL change, removal, or
+// wording change remains observable.
+const WRAPPED_REGION_RE = /<span\b(?=[^>]*\bdata-regions\b)[^>]*>\s*\(\s*<a\b(?=[^>]*\bhref="([^"]+)")[^>]*>\s*limited\s+regions\s*<\/a>\s*\)\s*<\/span>/gi;
+const DIRECT_REGION_RE = /<a\b(?=[^>]*\bdata-regions\b)(?=[^>]*\bhref="([^"]+)")[^>]*>\s*\(?\s*limited\s+regions\s*\)?\s*<\/a>/gi;
+
 function same(a, b) {
   return Object.is(a, b);
 }
@@ -80,6 +89,13 @@ function compactTextDelta(before = "", after = "", width = 420) {
   const newMid = after.slice(prefix, after.length - suffix || undefined).trim();
   const clip = (s) => s.length > width ? `${s.slice(0, width - 1)}…` : s;
   return { before: clip(oldMid), after: clip(newMid) };
+}
+
+function normalizeKnownMonitorVariants(value) {
+  const token = (href) => `<region-restriction href="${href}">limited regions</region-restriction>`;
+  return String(value ?? "")
+    .replace(WRAPPED_REGION_RE, (_match, href) => token(href))
+    .replace(DIRECT_REGION_RE, (_match, href) => token(href));
 }
 
 function compactStructureDelta(before = "", after = "", width = 420) {
@@ -209,16 +225,22 @@ export function diffSnapshots(before, after) {
   // identical, but this representation changed, surface the unexplained delta.
   // Missing monitorStructure means an older snapshot schema; bootstrap it silently.
   const goKnown = changes.some((change) => GO_CHANGE_TYPES.has(change.type));
+  const beforeGoStructure = typeof before.go.monitorStructure === "string"
+    ? normalizeKnownMonitorVariants(before.go.monitorStructure)
+    : null;
+  const afterGoStructure = typeof after.go.monitorStructure === "string"
+    ? normalizeKnownMonitorVariants(after.go.monitorStructure)
+    : null;
   if (
     !goKnown
-    && typeof before.go.monitorStructure === "string"
-    && typeof after.go.monitorStructure === "string"
-    && before.go.monitorStructure !== after.go.monitorStructure
+    && beforeGoStructure != null
+    && afterGoStructure != null
+    && beforeGoStructure !== afterGoStructure
   ) {
     changes.push({
       type: "unclassified_source_change",
       source: "go",
-      ...compactStructureDelta(before.go.monitorStructure, after.go.monitorStructure),
+      ...compactStructureDelta(beforeGoStructure, afterGoStructure),
     });
   }
 
