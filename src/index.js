@@ -17,6 +17,9 @@ const SECURITY_HEADERS = {
   "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src https://models.dev; connect-src 'none'; base-uri 'none'; frame-ancestors 'none'",
 };
 
+const UNKNOWN_PROVIDER_LOGO = '<span class="logo"><img loading="lazy" referrerpolicy="no-referrer" src="https://models.dev/logos/labs/openai.svg" alt="Unknown logo"></span>';
+const ALIBABA_PROVIDER_LOGO = '<span class="logo"><img loading="lazy" referrerpolicy="no-referrer" src="https://models.dev/logos/labs/alibaba.svg" alt="Alibaba logo"></span>';
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
@@ -38,6 +41,17 @@ function adminGuard(request, env) {
 
 async function previousError(env) {
   return env.STATE ? env.STATE.get(ERROR_KEY, { type: "json" }) : null;
+}
+
+function repairDashboardProviderLogos(html) {
+  // The dashboard provider matcher historically used /^Qwen\b/, which misses
+  // compact model ids such as Qwen3.7 because both "n" and "3" are word
+  // characters. Keep server-rendered output correct without rewriting model
+  // names: only replace an unknown logo when the immediately adjacent model
+  // label is Qwen. Truly unknown future providers remain unknown.
+  return html
+    .replaceAll(`${UNKNOWN_PROVIDER_LOGO}<span>Qwen`, `${ALIBABA_PROVIDER_LOGO}<span>Qwen`)
+    .replaceAll(`${UNKNOWN_PROVIDER_LOGO}<div><strong>Qwen`, `${ALIBABA_PROVIDER_LOGO}<div><strong>Qwen`);
 }
 
 async function safeArchive(env, event) {
@@ -87,7 +101,8 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/") {
       const [status, history] = await Promise.all([getStatus(env), readAlertHistory(env, 24)]);
-      return new Response(dashboard(status, history), {
+      const html = repairDashboardProviderLogos(dashboard(status, history));
+      return new Response(html, {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS },
       });
     }
