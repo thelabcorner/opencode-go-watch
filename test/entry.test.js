@@ -49,3 +49,51 @@ test("Telegram setup remains admin-protected before TELEGRAM_CHAT_ID exists", as
   assert.equal(response.status, 401);
   assert.deepEqual(await response.json(), { error: "unauthorized" });
 });
+
+test("Telegram test route rejects requests without the admin API key", async () => {
+  const originalFetch = globalThis.fetch;
+  let outboundCalls = 0;
+  globalThis.fetch = async () => {
+    outboundCalls += 1;
+    throw new Error("unauthorized test route must not call Telegram");
+  };
+
+  try {
+    const response = await worker.fetch(new Request("https://worker.example/telegram/test", {
+      method: "POST",
+    }), configuredEnv());
+
+    assert.equal(response.status, 401);
+    assert.deepEqual(await response.json(), { error: "unauthorized" });
+    assert.equal(outboundCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Telegram test route accepts the admin API key and sends exactly one test message", async () => {
+  const originalFetch = globalThis.fetch;
+  const outbound = [];
+  globalThis.fetch = async (url, init = {}) => {
+    outbound.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
+    return new Response('{"ok":true,"result":{}}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const response = await worker.fetch(new Request("https://worker.example/telegram/test", {
+      method: "POST",
+      headers: { "x-admin-token": "secret-admin" },
+    }), configuredEnv());
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(outbound.length, 1);
+    assert.match(outbound[0].url, /api\.telegram\.org\/botTOKEN\/sendMessage/);
+    assert.equal(outbound[0].body.chat_id, "42");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
