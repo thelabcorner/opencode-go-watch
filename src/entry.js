@@ -1,5 +1,6 @@
 import worker from "./index.js";
 
+const TELEGRAM_CHAT_ID_KEY = "telegram:chat_id:v1";
 const SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
@@ -17,29 +18,34 @@ function notFound() {
   });
 }
 
-function telegramSetupLocked(env) {
-  return Boolean(String(env?.TELEGRAM_CHAT_ID ?? "").trim());
+function authorized(request, env) {
+  if (!env.ADMIN_TOKEN) return false;
+  const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  const header = request.headers.get("x-admin-token");
+  return bearer === env.ADMIN_TOKEN || header === env.ADMIN_TOKEN;
+}
+
+export async function telegramSetupLocked(env) {
+  if (String(env?.TELEGRAM_CHAT_ID ?? "").trim()) return true;
+  if (!env?.STATE) return false;
+  return Boolean(String(await env.STATE.get(TELEGRAM_CHAT_ID_KEY) ?? "").trim());
 }
 
 export default {
-  fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
-    if (
-      request.method === "POST"
-      && url.pathname === "/telegram/setup"
-      && telegramSetupLocked(env)
-    ) {
-      // TELEGRAM_CHAT_ID is the post-bootstrap signal. Once it exists, make the
-      // setup endpoint indistinguishable from an unknown route and do not perform
-      // auth checks, KV reads, Telegram API calls, or any setup side effects.
-      return notFound();
+    if (request.method === "POST" && url.pathname === "/telegram/setup") {
+      // A configured environment variable can be rejected without touching KV.
+      if (String(env?.TELEGRAM_CHAT_ID ?? "").trim()) return notFound();
+
+      // Preserve the existing admin-auth boundary before consulting persisted
+      // setup state, so unauthenticated scans cannot amplify KV reads.
+      if (authorized(request, env) && await telegramSetupLocked(env)) return notFound();
     }
-    return worker.fetch(request, env, ctx);
+    return worker.fetch(request, env);
   },
 
   scheduled(controller, env, ctx) {
     return worker.scheduled(controller, env, ctx);
   },
 };
-
-export { telegramSetupLocked };
