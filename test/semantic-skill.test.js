@@ -8,7 +8,8 @@ const sourceMap = await readFile(new URL("../.opencode/skills/semantic-source-re
 const agents = await readFile(new URL("../AGENTS.md", import.meta.url), "utf8");
 
 test("semantic source review skill is valid and discoverable", () => {
-  assert.match(skill, /^---\n[\s\S]*?\nname: semantic-source-review\n/m);
+  assert.ok(skill.startsWith("---\nname: semantic-source-review\n"));
+  assert.match(skill, /\n---\n\n# Semantic Source Review Protocol\n/);
   assert.match(skill, /description: .+unclassified watcher alert/i);
   assert.match(skill, /references\/source-map\.md/);
   assert.match(skill, /sibling positive/i);
