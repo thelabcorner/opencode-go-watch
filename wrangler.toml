@@ -1,5 +1,5 @@
 name = "opencode-go-watch"
-main = "src/index.js"
+main = "src/entry.js"
 compatibility_date = "2026-08-19"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
