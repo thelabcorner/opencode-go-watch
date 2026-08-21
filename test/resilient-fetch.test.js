@@ -27,6 +27,40 @@ test("source GET retries a transient 5xx response", async () => {
   assert.equal(calls, 2);
 });
 
+test("caller abort cancels an in-flight GET without retrying", async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  const fetchImpl = async (_input, init) => {
+    calls++;
+    controller.abort(new DOMException("cancelled by caller", "AbortError"));
+    if (init.signal.aborted) throw init.signal.reason;
+    await new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }));
+  };
+  const resilient = makeResilientSourceFetch(fetchImpl);
+
+  await assert.rejects(
+    resilient("https://opencode.ai/go", { method: "GET", signal: controller.signal }),
+    (error) => error?.name === "AbortError" && /cancelled by caller/.test(error.message),
+  );
+  assert.equal(calls, 1);
+});
+
+test("pre-aborted caller signal prevents the GET from starting", async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  controller.abort(new DOMException("already cancelled", "AbortError"));
+  const resilient = makeResilientSourceFetch(async () => {
+    calls++;
+    return new Response("unexpected", { status: 200 });
+  });
+
+  await assert.rejects(
+    resilient("https://opencode.ai/go", { method: "GET", signal: controller.signal }),
+    (error) => error?.name === "AbortError" && /already cancelled/.test(error.message),
+  );
+  assert.equal(calls, 0);
+});
+
 test("POST requests are never retried to avoid duplicate Telegram sends", async () => {
   let calls = 0;
   const fetchImpl = async () => {
