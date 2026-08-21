@@ -1,2 +1,0 @@
-- `/telegram/setup` becomes nonfunctional after chat configuration is present in `TELEGRAM_CHAT_ID` or legacy KV state.
-- `/telegram/test` remains protected by `ADMIN_TOKEN`.
