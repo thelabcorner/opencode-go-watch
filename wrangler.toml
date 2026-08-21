@@ -5,11 +5,11 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 keep_vars = true
 
-# Hard runtime ceilings. These intentionally retain Free-plan-scale execution
-# behavior even if the account is later upgraded, so a regression cannot silently
-# turn into runaway CPU or subrequest billing.
+# The Workers Free plan already enforces a 10 ms CPU ceiling and rejects an
+# explicit limits.cpu_ms during deployment (Cloudflare API error 100328). Keep a
+# conservative subrequest ceiling here, which is supported on Free, and rely on
+# the platform's built-in CPU limit rather than trying to restate it in config.
 [limits]
-cpu_ms = 10
 subrequests = 32
 
 # Workers Logs are useful for the handful of explicit watcher events, but automatic
