@@ -32,6 +32,9 @@ const DOCS_CHANGE_TYPES = new Set([
 // wording change remains observable.
 const WRAPPED_REGION_RE = /<span\b(?=[^>]*\bdata-regions\b)[^>]*>\s*\(\s*<a\b(?=[^>]*\bhref="([^"]+)")[^>]*>\s*limited\s+regions\s*<\/a>\s*\)\s*<\/span>/gi;
 const DIRECT_REGION_RE = /<a\b(?=[^>]*\bdata-regions\b)(?=[^>]*\bhref="([^"]+)")[^>]*>\s*\(?\s*limited\s+regions\s*\)?\s*<\/a>/gi;
+const MONITOR_ITEM_RE = /<span\b(?=[^>]*\bdata-item\b)[^>]*>/gi;
+const DATA_MODEL_RE = /\bdata-model="([^"]+)"/i;
+const DATA_NAME_RE = /<span\b[^>]*\bdata-name(?:="[^"]*")?[^>]*>([\s\S]*?)<\/span>/i;
 
 function same(a, b) {
   return Object.is(a, b);
@@ -96,6 +99,64 @@ function normalizeKnownMonitorVariants(value) {
   return String(value ?? "")
     .replace(WRAPPED_REGION_RE, (_match, href) => token(href))
     .replace(DIRECT_REGION_RE, (_match, href) => token(href));
+}
+
+function decodeMonitorText(value) {
+  return String(value ?? "")
+    .replace(/<[^>]+>/g, "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// data-model is an actual OpenCode routing identifier, not presentation markup.
+// Older snapshots did not persist it as a first-class field, but their normalized
+// monitorStructure still contains both data-model and data-name. Recover the map
+// from that structure so a deployment can classify an identifier rename immediately
+// without resetting the baseline or waiting for a new schema generation.
+function chartModelIdsFromMonitor(structure) {
+  const source = String(structure ?? "");
+  if (!source) return {};
+  const starts = [];
+  MONITOR_ITEM_RE.lastIndex = 0;
+  let match;
+  while ((match = MONITOR_ITEM_RE.exec(source)) !== null) starts.push({ index: match.index, tag: match[0] });
+
+  const ids = {};
+  for (let i = 0; i < starts.length; i++) {
+    const current = starts[i];
+    const modelId = DATA_MODEL_RE.exec(current.tag)?.[1] ?? null;
+    if (!modelId) continue;
+    const end = i + 1 < starts.length ? starts[i + 1].index : source.length;
+    const segment = source.slice(current.index, end);
+    const name = decodeMonitorText(DATA_NAME_RE.exec(segment)?.[1]);
+    if (name) ids[name] = modelId;
+  }
+  return ids;
+}
+
+function diffChartModelIds(beforeGo, afterGo) {
+  const before = chartModelIdsFromMonitor(beforeGo?.monitorStructure);
+  const after = chartModelIdsFromMonitor(afterGo?.monitorStructure);
+  const changes = [];
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
+    // Added/removed chart models already have their own lifecycle semantics. This
+    // handler is specifically for a stable visible model whose routing ID changes.
+    if (!(name in before) || !(name in after) || before[name] === after[name]) continue;
+    changes.push({
+      type: "chart_changed",
+      key: name,
+      field: "modelId",
+      before: before[name],
+      after: after[name],
+    });
+  }
+  return changes;
 }
 
 function compactStructureDelta(before = "", after = "", width = 420) {
@@ -191,6 +252,12 @@ export function diffSnapshots(before, after) {
     changedType: "chart_changed",
     fields: ["requests5h", "bonus"],
   }));
+
+  // Model routing IDs live in data-model attributes on the Go chart. Treat a
+  // same-name ID replacement as a known semantic field change before the generic
+  // residual fallback. This turns changes such as x-preview-f-free → ox-alpha-free
+  // into an explicit model-ID event instead of an "unclassified" markup alert.
+  changes.push(...diffChartModelIds(before.go, after.go));
 
   if (before.go.promoBanner !== after.go.promoBanner) {
     changes.push({ type: "promo_banner_changed", before: before.go.promoBanner, after: after.go.promoBanner });
