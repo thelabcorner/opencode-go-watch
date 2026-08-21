@@ -10,13 +10,23 @@ function configuredEnv() {
   };
 }
 
-test("Telegram setup lock is driven only by a non-empty TELEGRAM_CHAT_ID", () => {
-  assert.equal(telegramSetupLocked({ TELEGRAM_CHAT_ID: "42" }), true);
-  assert.equal(telegramSetupLocked({ TELEGRAM_CHAT_ID: "   " }), false);
-  assert.equal(telegramSetupLocked({}), false);
+function stateWithChatId(chatId = "42") {
+  return {
+    async get(key) {
+      return key === "telegram:chat_id:v1" ? chatId : null;
+    },
+  };
+}
+
+test("Telegram setup lock recognizes env and persisted chat configuration", async () => {
+  assert.equal(await telegramSetupLocked({ TELEGRAM_CHAT_ID: "42" }), true);
+  assert.equal(await telegramSetupLocked({ TELEGRAM_CHAT_ID: "   " }), false);
+  assert.equal(await telegramSetupLocked({ STATE: stateWithChatId("42") }), true);
+  assert.equal(await telegramSetupLocked({ STATE: stateWithChatId("   ") }), false);
+  assert.equal(await telegramSetupLocked({}), false);
 });
 
-test("configured Telegram setup route is indistinguishable from an unknown route", async () => {
+test("env-configured Telegram setup route is indistinguishable from an unknown route", async () => {
   const originalFetch = globalThis.fetch;
   let outboundCalls = 0;
   globalThis.fetch = async () => {
@@ -38,7 +48,33 @@ test("configured Telegram setup route is indistinguishable from an unknown route
   }
 });
 
-test("Telegram setup remains admin-protected before TELEGRAM_CHAT_ID exists", async () => {
+test("KV-configured Telegram setup route is also disabled without variable migration", async () => {
+  const originalFetch = globalThis.fetch;
+  let outboundCalls = 0;
+  globalThis.fetch = async () => {
+    outboundCalls += 1;
+    throw new Error("locked setup route must not call Telegram");
+  };
+
+  try {
+    const response = await worker.fetch(new Request("https://worker.example/telegram/setup", {
+      method: "POST",
+      headers: { "x-admin-token": "secret-admin" },
+    }), {
+      ADMIN_TOKEN: "secret-admin",
+      TELEGRAM_BOT_TOKEN: "TOKEN",
+      STATE: stateWithChatId("42"),
+    });
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "not found" });
+    assert.equal(outboundCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Telegram setup remains admin-protected before chat configuration exists", async () => {
   const response = await worker.fetch(new Request("https://worker.example/telegram/setup", {
     method: "POST",
   }), {
