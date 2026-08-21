@@ -2,6 +2,8 @@ import { canonicalMonitoredHtml, extractHtmlTables, extractSectionHtml, normaliz
 
 const MONEY = /^\$([\d.]+)$/;
 const INTEGER = /^-?\d+$/;
+const UNLIMITED = /^(?:∞|infinity|unlimited)$/i;
+const EMPTY_LIMIT = /^(?:-|—|–)$/;
 const PROFILE_RE = /^([^\n]+?)\s*[—–-]\s*([\d,]+)\s+input,\s*([\d,]+)\s+cached,\s*([\d,]+)\s+output\s+tokens\s+per\s+request\s*$/gim;
 const ITEM_START_RE = /<span\b[^>]*\bdata-item(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>/gi;
 const VALUE_RE = /<span\b[^>]*\bdata-value(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>/i;
@@ -30,6 +32,14 @@ export function parseMoney(value) {
   if (source === "-" || source === "—" || source === "") return null;
   const match = MONEY.exec(source.replaceAll(",", ""));
   return match ? Number(match[1]) : null;
+}
+
+function parseRequestLimit(value) {
+  const source = compactScalar(value);
+  if (UNLIMITED.test(source)) return { value: null, unlimited: true, empty: false };
+  if (!source || EMPTY_LIMIT.test(source)) return { value: null, unlimited: false, empty: true };
+  const parsed = parseInteger(source);
+  return { value: parsed, unlimited: false, empty: parsed == null };
 }
 
 function canonicalHeader(value) {
@@ -62,12 +72,22 @@ function rowsToRequestMap(rows) {
   const out = {};
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    if (row.length < 4) continue;
-    const requests5h = parseInteger(row[1]);
-    const requestsWeek = parseInteger(row[2]);
-    const requestsMonth = parseInteger(row[3]);
-    if (!row[0] || requests5h == null || requestsWeek == null || requestsMonth == null) continue;
-    out[row[0]] = { requests5h, requestsWeek, requestsMonth };
+    if (row.length < 4 || !row[0]) continue;
+    const five = parseRequestLimit(row[1]);
+    const week = parseRequestLimit(row[2]);
+    const month = parseRequestLimit(row[3]);
+    const explicitUnlimited = five.unlimited || week.unlimited || month.unlimited;
+    // OpenCode currently represents Go models that sit outside the dollar quota as
+    // ∞ on the landing chart but '-' across all request-count cells in the docs.
+    // Preserve that row instead of dropping it. We only infer quota exemption from
+    // an all-empty row; this does NOT imply absence of a separate free-model rate limit.
+    const quotaExempt = explicitUnlimited || (five.empty && week.empty && month.empty);
+    if (quotaExempt) {
+      out[row[0]] = { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true };
+      continue;
+    }
+    if (five.value == null || week.value == null || month.value == null) continue;
+    out[row[0]] = { requests5h: five.value, requestsWeek: week.value, requestsMonth: month.value, unlimited: false };
   }
   return out;
 }
@@ -270,16 +290,20 @@ export function parsePreparedGoPage(prepared) {
   const starts = [];
   ITEM_START_RE.lastIndex = 0;
   let itemStart;
-  while ((itemStart = ITEM_START_RE.exec(prepared.chartHtml)) !== null) starts.push(itemStart.index);
+  while ((itemStart = ITEM_START_RE.exec(prepared.chartHtml)) !== null) starts.push({ index: itemStart.index, tag: itemStart[0] });
   for (let i = 0; i < starts.length; i++) {
-    const segment = prepared.chartHtml.slice(starts[i], i + 1 < starts.length ? starts[i + 1] : prepared.chartHtml.length);
+    const segment = prepared.chartHtml.slice(starts[i].index, i + 1 < starts.length ? starts[i + 1].index : prepared.chartHtml.length);
     const valueMatch = VALUE_RE.exec(segment);
     const nameMatch = NAME_RE.exec(segment);
-    if (!valueMatch || !nameMatch) continue;
+    if (!nameMatch) continue;
     const bonusMatch = BONUS_RE.exec(segment);
-    const requests5h = parseInteger(textContent(valueMatch[1]));
+    const valueText = valueMatch ? textContent(valueMatch[1]) : "";
+    const explicitInfinite = /\bdata-infinite(?:\s|=|>)/i.test(starts[i].tag) || UNLIMITED.test(compactScalar(valueText));
+    const requests5h = explicitInfinite ? null : parseInteger(valueText);
     const normalized = normalizeChartName(textContent(nameMatch[1]), bonusMatch ? textContent(bonusMatch[1]) : null);
-    if (requests5h != null && normalized.name) chart[normalized.name] = { requests5h, bonus: normalized.bonus };
+    if (normalized.name && (explicitInfinite || requests5h != null)) {
+      chart[normalized.name] = { requests5h, bonus: normalized.bonus, unlimited: explicitInfinite };
+    }
   }
 
   // Text fallback also runs for suspiciously small structured results, not just
@@ -288,18 +312,19 @@ export function parsePreparedGoPage(prepared) {
     const chartText = textContent(prepared.chartHtml);
     const regionMatch = /Go\s+1x[\s\S]{0,8000}?Requests per 5 hour/i.exec(chartText);
     const region = regionMatch?.[0] ?? chartText;
-    const rowPattern = /([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9().×x-]+){0,8}?)(?=\s+[\d,]+\s+[A-Z]|\s+\d+(?:\.\d+)?[x×]\s+usage|\s+Requests per 5 hour)/g;
+    const rowPattern = /([\d,]+|∞)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9().×x-]+){0,8}?)(?=\s+(?:[\d,]+|∞)\s+[A-Z]|\s+\d+(?:\.\d+)?[x×]\s+usage|\s+Requests per 5 hour)/g;
     let row;
     while ((row = rowPattern.exec(region)) !== null) {
-      const requests5h = parseInteger(row[1]);
+      const explicitInfinite = UNLIMITED.test(compactScalar(row[1]));
+      const requests5h = explicitInfinite ? null : parseInteger(row[1]);
       const normalized = normalizeChartName(row[2], null);
-      if (requests5h != null && normalized.name) chart[normalized.name] = { requests5h, bonus: normalized.bonus };
+      if (normalized.name && (explicitInfinite || requests5h != null)) chart[normalized.name] = { requests5h, bonus: normalized.bonus, unlimited: explicitInfinite };
     }
     const bonusMatch = /([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9.-]+){0,8})\s+(\d+(?:\.\d+)?[x×]\s+usage)/i.exec(region);
     if (bonusMatch) {
       const requests5h = parseInteger(bonusMatch[1]);
       const normalized = normalizeChartName(bonusMatch[2], bonusMatch[3]);
-      if (requests5h != null) chart[normalized.name] = { requests5h, bonus: normalized.bonus };
+      if (requests5h != null) chart[normalized.name] = { requests5h, bonus: normalized.bonus, unlimited: false };
     }
   }
 
@@ -385,7 +410,15 @@ export function deriveConsistency(go, docs) {
   for (const [name, chart] of Object.entries(go.chart ?? {})) {
     const doc = docs.requests?.[name];
     if (!doc) {
-      out[name] = { status: "chart_only", chart: chart.requests5h, docs: null };
+      out[name] = { status: "chart_only", chart: chart.requests5h, docs: null, unlimited: Boolean(chart.unlimited) };
+      continue;
+    }
+    if (Boolean(chart.unlimited) && Boolean(doc.unlimited)) {
+      out[name] = { status: "match", chart: null, docs: null, unlimited: true };
+      continue;
+    }
+    if (Boolean(chart.unlimited) !== Boolean(doc.unlimited)) {
+      out[name] = { status: "mismatch", chart: chart.requests5h, docs: doc.requests5h, chartUnlimited: Boolean(chart.unlimited), docsUnlimited: Boolean(doc.unlimited) };
       continue;
     }
     if (chart.requests5h === doc.requests5h) {
