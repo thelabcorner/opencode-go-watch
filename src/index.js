@@ -1,6 +1,7 @@
 import { getStatus, readSnapshot, recordFailure, resetBaseline, runWatch } from "./watcher.js";
 import { buildErrorMessage, sendTelegram, setupTelegram } from "./telegram.js";
 import { resilientSourceFetch } from "./resilient-fetch.js";
+import { shouldRecordFailure } from "./resource-budget.js";
 import { dashboard, dashboardScript } from "./dashboard.js";
 import { zenDashboard, zenDashboardScript } from "./zen-dashboard.js";
 import { getZenStatus, readZenSnapshot, recordZenFailure, resetZenBaseline, runZenWatch } from "./zen.js";
@@ -290,6 +291,10 @@ export default {
         console.log(JSON.stringify({ event: "watch.complete", surface: "go", status: result.status, changes: result.changes.length, optimization: result.optimization }));
       } catch (error) {
         console.error("Go watch failed", error);
+        if (!shouldRecordFailure(priorError, error, now)) {
+          console.warn(JSON.stringify({ event: "watch.failure_suppressed", surface: "go", reason: "kv_write_budget" }));
+          return;
+        }
         const failure = await recordFailure(env, error, { fetchImpl: resilientSourceFetch, now });
         if (failure.notified) await safeArchive(env, historyEventForFailure(error, now));
       }
@@ -305,6 +310,10 @@ export default {
         console.log(JSON.stringify({ event: "watch.complete", surface: "zen", status: result.status, changes: result.changes.length, optimization: result.optimization }));
       } catch (error) {
         console.error("Zen watch failed", error);
+        if (!shouldRecordFailure(priorError, error, now)) {
+          console.warn(JSON.stringify({ event: "watch.failure_suppressed", surface: "zen", reason: "kv_write_budget" }));
+          return;
+        }
         const failure = await recordZenFailure(env, error, {
           now,
           notify: async (failureError, at) => sendZenTelegram(env, buildZenErrorMessage(failureError, at.toISOString(), env.TIMEZONE || "America/Chicago")),
