@@ -124,7 +124,7 @@ test("live dashboard renders every docs model, maker logos, pricing tiers and De
   assert.doesNotMatch(body, /secret-admin|TOKEN/);
 });
 
-test("root renders Brotli-backed historical Telegram alerts above the all-model chart", async () => {
+test("root renders bounded raw-JSON historical Telegram alerts above the all-model chart", async () => {
   const e = env();
   await e.STATE.put("snapshot:v1", JSON.stringify(dashboardSnapshot()));
   const archived = await appendAlertEvent(e, {
@@ -138,7 +138,8 @@ test("root renders Brotli-backed historical Telegram alerts above the all-model 
     message: "DeepSeek V4 Flash input price changed.",
   });
   assert.equal(archived.archived, true);
-  assert(archived.compressedBytes < archived.rawBytes, "history should be Brotli-compressed before KV storage");
+  assert.equal(archived.storedBytes, archived.rawBytes, "new history records should avoid synchronous compression work");
+  assert(archived.storedBytes > 0);
 
   const response = await worker.fetch(new Request("https://worker.example/"), e);
   const body = await response.text();
