@@ -194,8 +194,6 @@ function renderBlocks(changes, snapshot) {
   const consumed = new Set();
   const blocks = [];
 
-  // Model lifecycle cards absorb their associated profile/pricing/chart lifecycle
-  // changes to avoid four alerts for what is conceptually one launch/removal.
   changes.forEach((change, index) => {
     if (change.type !== "model_added" && change.type !== "model_removed") return;
     consumed.add(index);
@@ -366,13 +364,32 @@ export function buildErrorMessage(error, checkedAt, timeZone = "America/Chicago"
   return `🔴 <b>OPENCODE GO WATCH · ERROR</b>\n━━━━━━━━━━━━━━━━━━━━\nA monitoring run failed. The previous semantic baseline was preserved, so no false removals will be recorded.\n\n<code>${escapeHtml(error?.message ?? String(error))}</code>\n\n🕒 ${escapeHtml(formatTime(checkedAt, timeZone))}`;
 }
 
-export function telegramKeyboard() {
-  return {
-    inline_keyboard: [[
-      { text: "📊 Open Go", url: "https://opencode.ai/go" },
-      { text: "📚 Usage Docs", url: "https://opencode.ai/docs/go/#usage-limits" },
-    ]],
-  };
+export function watcherDashboardUrl(env, path = "/") {
+  const configured = String(env?.WATCHER_DASHBOARD_URL ?? "").trim();
+  if (!configured) return null;
+  try {
+    const url = new URL(configured);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    url.search = "";
+    url.hash = "";
+    url.pathname = "/";
+    const base = url.toString().replace(/\/$/, "");
+    const suffix = path === "/" ? "/" : `/${String(path).replace(/^\/+|\/+$/g, "")}`;
+    return `${base}${suffix}`;
+  } catch {
+    return null;
+  }
+}
+
+export function telegramKeyboard(env = {}) {
+  const rows = [];
+  const dashboard = watcherDashboardUrl(env, "/");
+  if (dashboard) rows.push([{ text: "🛰 Watcher Dashboard", url: dashboard }]);
+  rows.push([
+    { text: "📊 Open Go", url: "https://opencode.ai/go" },
+    { text: "📚 Usage Docs", url: "https://opencode.ai/docs/go/#usage-limits" },
+  ]);
+  return { inline_keyboard: rows };
 }
 
 async function telegramApi(env, method, payload, fetchImpl = fetch) {
@@ -424,7 +441,7 @@ export async function sendTelegram(env, html, fetchImpl = fetch) {
     text: html,
     parse_mode: "HTML",
     link_preview_options: { is_disabled: true },
-    reply_markup: telegramKeyboard(),
+    reply_markup: telegramKeyboard(env),
   }, fetchImpl);
   return { skipped: false, chatIdSuffix: String(chatId).slice(-4) };
 }
