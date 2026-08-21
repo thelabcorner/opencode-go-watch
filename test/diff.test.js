@@ -30,6 +30,23 @@ test("finds changed requests, additions/removals, pricing and chart changes", ()
   assert(changes.some((c) => c.type === "chart_changed" && c.key === "Hy3" && c.field === "bonus"));
 });
 
+test("classifies a stable Go model's data-model ID replacement semantically", () => {
+  const beforeHtml = goHtml.replace('data-model="hy3"', 'data-model="x-preview-f-free"');
+  const afterHtml = goHtml.replace('data-model="hy3"', 'data-model="ox-alpha-free"');
+  const before = { ...snap(), go: parseGoPage(beforeHtml) };
+  const after = { ...snap(), go: parseGoPage(afterHtml), checkedAt: "2026-08-21T09:10:00.000Z" };
+
+  const changes = diffSnapshots(before, after);
+  assert.deepEqual(changes, [{
+    type: "chart_changed",
+    key: "Hy3",
+    field: "modelId",
+    before: "x-preview-f-free",
+    after: "ox-alpha-free",
+  }]);
+  assert.equal(changes.some((change) => change.type === "unclassified_source_change"), false);
+});
+
 test("emits an unclassified fallback when monitored chart structure changes without a known semantic delta", () => {
   const before = snap();
   const changedHtml = goHtml.replace('data-model="hy3"', 'data-model="hy3" data-context-window="1m"');
