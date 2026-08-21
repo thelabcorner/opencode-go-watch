@@ -25,6 +25,22 @@ test("renders rich grouped change cards with deltas", () => {
   assert.ok(messages[0].length < 4096);
 });
 
+test("renders routing identifier replacements as a dedicated Go model ID card", () => {
+  const messages = buildChangeMessages([
+    { type: "chart_changed", key: "Ox Alpha", field: "modelId", before: "x-preview-f-free", after: "ox-alpha-free" },
+  ], {
+    checkedAt: "2026-08-21T09:10:00.000Z",
+    docs: { pricing: {}, profiles: {} },
+    go: { chart: { "Ox Alpha": { requests5h: 0, bonus: null } } },
+  });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /OPENCODE GO · MODEL ID CHANGED/);
+  assert.match(messages[0], /GO MODEL ID CHANGED/);
+  assert.match(messages[0], /Ox Alpha/);
+  assert.match(messages[0], /opencode\/x-preview-f-free → opencode\/ox-alpha-free/);
+  assert.doesNotMatch(messages[0], /UNCLASSIFIED/);
+});
+
 test("new model lifecycle is rendered as one rich model card", () => {
   const snapshot = {
     checkedAt: "2026-08-19T18:30:00.000Z",

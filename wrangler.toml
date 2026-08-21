@@ -5,12 +5,10 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 keep_vars = true
 
-# The Workers Free plan already enforces a 10 ms CPU ceiling and rejects an
-# explicit limits.cpu_ms during deployment (Cloudflare API error 100328). Keep a
-# conservative subrequest ceiling here, which is supported on Free, and rely on
-# the platform's built-in CPU limit rather than trying to restate it in config.
-[limits]
-subrequests = 32
+# Do not emit a [limits] block on Workers Free. Cloudflare's versions API rejects
+# runtime limit configuration for this account with API error 100328, even when the
+# block only lowers the subrequest ceiling. Rely on the platform's built-in Free
+# limits instead: 10 ms CPU and 50 external subrequests per invocation.
 
 # Workers Logs are useful for the handful of explicit watcher events, but automatic
 # per-invocation logs would scale with arbitrary public dashboard traffic. Tracing is

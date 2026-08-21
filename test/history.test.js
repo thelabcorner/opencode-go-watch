@@ -113,3 +113,15 @@ test("watch outcomes classify semantic, failure and recovery history cards", () 
   assert.equal(recovery.severity, "success");
   assert.match(recovery.detail, /timeout/);
 });
+
+test("model routing ID replacements get a dedicated semantic history card", () => {
+  const event = historyEventForWatchResult({
+    status: "changed",
+    changes: [{ type: "chart_changed", key: "Ox Alpha", field: "modelId", before: "x-preview-f-free", after: "ox-alpha-free" }],
+  }, new Date("2026-08-21T09:10:00Z"));
+  assert.equal(event.kind, "model-id");
+  assert.equal(event.severity, "info");
+  assert.match(event.title, /MODEL ID CHANGED/);
+  assert.match(event.detail, /Ox Alpha/);
+  assert.match(event.detail, /x-preview-f-free → ox-alpha-free/);
+});

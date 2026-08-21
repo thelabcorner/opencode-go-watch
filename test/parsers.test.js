@@ -22,7 +22,7 @@ test("parses Go chart and promotion", () => {
 test("parses docs limits, request table, expanded profiles and pricing", () => {
   const docs = parseDocsPage(docsHtml);
   assert.deepEqual(docs.limits, { fiveHourUsd: 12, weeklyUsd: 30, monthlyUsd: 60 });
-  assert.deepEqual(docs.requests["GPT 5.6 Luna"], { requests5h: 2050, requestsWeek: 5100, requestsMonth: 10250 });
+  assert.deepEqual(docs.requests["GPT 5.6 Luna"], { requests5h: 2050, requestsWeek: 5100, requestsMonth: 10250, unlimited: false });
   assert.equal(docs.profiles["Grok 4.5"].cachedTokens, 71500);
   assert.equal(docs.profiles["GLM-5.3"].cachedTokens, 52000);
   assert.equal(docs.profiles["GLM-5.2"].cachedTokens, 52000);
@@ -31,6 +31,31 @@ test("parses docs limits, request table, expanded profiles and pricing", () => {
   assert.equal(docs.profiles["Kimi K2.6"].cachedTokens, 55000);
   assert.equal(docs.pricing["GPT 5.6 Luna (≤ 272K tokens)"].cachedWritePerM, 0.25);
   assert.equal(docs.pricing["Grok 4.5"].cachedWritePerM, null);
+});
+
+test("parses infinite Go chart entries and dash-only docs rows as quota-exempt", () => {
+  const go = parseGoPage(`
+    <figure data-component="limit-graph">
+      <span data-item data-kind="go" data-model="ox-alpha-free" data-infinite>
+        <span data-name>Ox Alpha Free</span>
+      </span>
+    </figure>`);
+  assert.deepEqual(go.chart["Ox Alpha Free"], { requests5h: null, bonus: null, unlimited: true });
+
+  const docs = parseDocsPage(`
+    <h2>Usage limits</h2>
+    <p>5 hour limit — $12</p><p>Weekly limit — $30</p><p>Monthly limit — $60</p>
+    <table><tr><th>Model</th><th>requests per 5 hour</th><th>requests per week</th><th>requests per month</th></tr>
+      <tr><td>Ox Alpha Free</td><td>-</td><td>-</td><td>-</td></tr>
+      <tr><td>Example</td><td>100</td><td>200</td><td>400</td></tr>
+    </table>
+    <p>Example — 100 input, 100 cached, 100 output tokens per request</p>
+    <table><tr><th>Model</th><th>Input</th><th>Output</th><th>Cached Read</th><th>Cached Write</th><th>Usage</th></tr>
+      <tr><td>Ox Alpha Free</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+      <tr><td>Example</td><td>$1</td><td>$1</td><td>$1</td><td>-</td><td>$15</td></tr>
+    </table>`);
+  assert.deepEqual(docs.requests["Ox Alpha Free"], { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true });
+  assert.deepEqual(deriveConsistency(go, docs)["Ox Alpha Free"], { status: "match", chart: null, docs: null, unlimited: true });
 });
 
 test("expands historical grouped profile labels without rename noise", () => {
@@ -55,7 +80,7 @@ test("normalizes historical promotion embedded in model name", () => {
       <span data-name>GPT 5.6 Luna (2x usage)</span>
     </span></figure>`;
   const go = parseGoPage(html);
-  assert.deepEqual(go.chart["GPT 5.6 Luna"], { requests5h: 4100, bonus: "2x usage" });
+  assert.deepEqual(go.chart["GPT 5.6 Luna"], { requests5h: 4100, bonus: "2x usage", unlimited: false });
   assert.equal(go.chart["GPT 5.6 Luna (2x usage)"], undefined);
 });
 
