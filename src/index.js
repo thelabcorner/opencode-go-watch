@@ -1,12 +1,14 @@
 import { getStatus, readSnapshot, recordFailure, resetBaseline, runWatch } from "./watcher.js";
 import { buildErrorMessage, sendTelegram, setupTelegram } from "./telegram.js";
 import { resilientSourceFetch } from "./resilient-fetch.js";
+import { shouldRecordFailure } from "./resource-budget.js";
 import { dashboard, dashboardScript } from "./dashboard.js";
 import { zenDashboard, zenDashboardScript } from "./zen-dashboard.js";
 import { getZenStatus, readZenSnapshot, recordZenFailure, resetZenBaseline, runZenWatch } from "./zen.js";
 import { buildZenBootMessage, buildZenChangeMessages, buildZenErrorMessage, buildZenRecoveryMessage, sendZenTelegram } from "./zen-telegram.js";
 import {
   appendAlertEvent,
+  appendAlertEvents,
   historyEventForFailure,
   historyEventForRecovery,
   historyEventForWatchResult,
@@ -59,6 +61,16 @@ async function safeArchive(env, event) {
     await appendAlertEvent(env, event);
   } catch (error) {
     console.error("alert history archive failed", error);
+  }
+}
+
+async function safeArchiveMany(env, events) {
+  const filtered = events.filter(Boolean);
+  if (!filtered.length) return;
+  try {
+    await appendAlertEvents(env, filtered);
+  } catch (error) {
+    console.error("alert history batch archive failed", error);
   }
 }
 
@@ -281,17 +293,24 @@ export default {
 
   async scheduled(controller, env, ctx) {
     const now = new Date(controller.scheduledTime);
+    const historyEvents = [];
 
     const goTask = (async () => {
       const priorError = await previousError(env);
       try {
         const result = await runWatch(env, { now, fetchImpl: resilientSourceFetch });
-        await archiveSuccessfulRun(env, result, priorError, now);
+        const notifyBootstrap = String(env.NOTIFY_ON_BOOTSTRAP ?? "true").toLowerCase() !== "false";
+        if (result.status !== "bootstrapped" || notifyBootstrap) historyEvents.push(historyEventForWatchResult(result, now));
+        if (priorError) historyEvents.push(historyEventForRecovery(priorError, now));
         console.log(JSON.stringify({ event: "watch.complete", surface: "go", status: result.status, changes: result.changes.length, optimization: result.optimization }));
       } catch (error) {
         console.error("Go watch failed", error);
+        if (!shouldRecordFailure(priorError, error, now)) {
+          console.warn(JSON.stringify({ event: "watch.failure_suppressed", surface: "go", reason: "kv_write_budget" }));
+          return;
+        }
         const failure = await recordFailure(env, error, { fetchImpl: resilientSourceFetch, now });
-        if (failure.notified) await safeArchive(env, historyEventForFailure(error, now));
+        if (failure.notified) historyEvents.push(historyEventForFailure(error, now));
       }
     })();
 
@@ -300,19 +319,23 @@ export default {
       try {
         const result = await runZenWatch(env, { now, fetchImpl: resilientSourceFetch, ...zenCallbacks(env) });
         const notifyBootstrap = String(env.NOTIFY_ON_ZEN_BOOTSTRAP ?? "true").toLowerCase() !== "false";
-        if (result.status !== "bootstrapped" || notifyBootstrap) await safeArchive(env, zenHistoryEventForResult(result, now));
-        if (priorError) await safeArchive(env, zenHistoryRecovery(priorError, now));
+        if (result.status !== "bootstrapped" || notifyBootstrap) historyEvents.push(zenHistoryEventForResult(result, now));
+        if (priorError) historyEvents.push(zenHistoryRecovery(priorError, now));
         console.log(JSON.stringify({ event: "watch.complete", surface: "zen", status: result.status, changes: result.changes.length, optimization: result.optimization }));
       } catch (error) {
         console.error("Zen watch failed", error);
+        if (!shouldRecordFailure(priorError, error, now)) {
+          console.warn(JSON.stringify({ event: "watch.failure_suppressed", surface: "zen", reason: "kv_write_budget" }));
+          return;
+        }
         const failure = await recordZenFailure(env, error, {
           now,
           notify: async (failureError, at) => sendZenTelegram(env, buildZenErrorMessage(failureError, at.toISOString(), env.TIMEZONE || "America/Chicago")),
         });
-        if (failure.notified) await safeArchive(env, zenHistoryFailure(error, now));
+        if (failure.notified) historyEvents.push(zenHistoryFailure(error, now));
       }
     })();
 
-    ctx.waitUntil(Promise.all([goTask, zenTask]));
+    ctx.waitUntil(Promise.all([goTask, zenTask]).then(() => safeArchiveMany(env, historyEvents)));
   },
 };

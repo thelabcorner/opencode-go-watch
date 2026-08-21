@@ -24,6 +24,36 @@ function retryableNetworkError(error) {
   return name === "TypeError" || /fetch failed|network|connection|socket/i.test(message);
 }
 
+function throwIfCallerAborted(signal) {
+  if (!signal?.aborted) return;
+  if (typeof signal.throwIfAborted === "function") signal.throwIfAborted();
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new DOMException("The operation was aborted", "AbortError");
+}
+
+function attemptSignal(callerSignal) {
+  const timeoutSignal = AbortSignal.timeout(SOURCE_TIMEOUT_MS);
+  if (!callerSignal) return { signal: timeoutSignal, cleanup() {} };
+
+  const controller = new AbortController();
+  const abortFrom = (source) => () => {
+    if (!controller.signal.aborted) controller.abort(source.reason);
+  };
+  const onCallerAbort = abortFrom(callerSignal);
+  const onTimeoutAbort = abortFrom(timeoutSignal);
+
+  callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+  timeoutSignal.addEventListener("abort", onTimeoutAbort, { once: true });
+
+  return {
+    signal: controller.signal,
+    cleanup() {
+      callerSignal.removeEventListener("abort", onCallerAbort);
+      timeoutSignal.removeEventListener("abort", onTimeoutAbort);
+    },
+  };
+}
+
 async function cancelBody(response) {
   try {
     if (response?.body) await response.body.cancel();
@@ -49,13 +79,14 @@ export function makeResilientSourceFetch(fetchImpl = fetch) {
     let lastError = null;
 
     for (let attempt = 1; attempt <= SOURCE_ATTEMPTS; attempt++) {
+      throwIfCallerAborted(init.signal);
+      const attemptAbort = attemptSignal(init.signal);
       try {
         const response = await fetchImpl(input, {
           ...init,
-          // Replace the caller's one-shot timeout signal so every retry gets a
-          // fresh budget. The watcher previously reused a signal that was already
-          // aborted, which would make a wrapper-level retry useless.
-          signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS),
+          // Keep caller cancellation semantics while giving every retry a fresh
+          // per-attempt timeout budget.
+          signal: attemptAbort.signal,
         });
 
         if (attempt < SOURCE_ATTEMPTS && retryableStatus(response.status)) {
@@ -65,7 +96,12 @@ export function makeResilientSourceFetch(fetchImpl = fetch) {
         return response;
       } catch (error) {
         lastError = error;
+        // External cancellation is a control-flow decision, not a transient source
+        // failure. Do not turn it into a retry or wrap it as an upstream failure.
+        if (init.signal?.aborted) throw error;
         if (attempt >= SOURCE_ATTEMPTS || !retryableNetworkError(error)) break;
+      } finally {
+        attemptAbort.cleanup();
       }
     }
 

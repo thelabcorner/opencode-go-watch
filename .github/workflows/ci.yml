@@ -19,3 +19,4 @@ jobs:
       - run: npm install --ignore-scripts --no-audit --no-fund
       - run: npm run validate
       - run: npm run test:coverage
+      - run: npm run cf:dry-run

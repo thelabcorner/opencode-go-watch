@@ -1,5 +1,5 @@
 /// <reference path="./node-zlib.d.ts" />
-import { brotliCompressSync, brotliDecompressSync, constants } from "node:zlib";
+import { brotliDecompressSync } from "node:zlib";
 
 const HISTORY_KEY = "alert-history:v1";
 const HISTORY_SCHEMA = 1;
@@ -7,7 +7,6 @@ const MAX_EVENTS = 96;
 const MAX_JSON_BYTES = 96 * 1024;
 const MAX_DETAIL_CHARS = 1600;
 const MAX_CHANGE_ROWS = 24;
-const BROTLI_QUALITY = 5;
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
 
@@ -96,22 +95,17 @@ function sanitizeEvent(event) {
 function encodeHistory(events) {
   let retained = events.slice(0, MAX_EVENTS);
   let json = JSON.stringify({ schema: HISTORY_SCHEMA, events: retained });
-  while (ENCODER.encode(json).byteLength > MAX_JSON_BYTES && retained.length > 1) {
+  let input = ENCODER.encode(json);
+  while (input.byteLength > MAX_JSON_BYTES && retained.length > 1) {
     retained = retained.slice(0, -1);
     json = JSON.stringify({ schema: HISTORY_SCHEMA, events: retained });
+    input = ENCODER.encode(json);
   }
-  const input = ENCODER.encode(json);
-  const compressed = brotliCompressSync(input, {
-    params: {
-      [constants.BROTLI_PARAM_MODE]: constants.BROTLI_MODE_TEXT,
-      [constants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY,
-    },
-  });
   return {
     events: retained,
-    bytes: compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength),
+    bytes: input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength),
     rawBytes: input.byteLength,
-    compressedBytes: compressed.byteLength,
+    storedBytes: input.byteLength,
   };
 }
 
@@ -120,33 +114,58 @@ function normalizeEvents(value) {
   return value.events.filter((event) => event && typeof event.at === "string" && typeof event.title === "string");
 }
 
+function bytesOf(raw) {
+  if (typeof raw === "string") return ENCODER.encode(raw);
+  if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+  if (ArrayBuffer.isView(raw)) return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+  return null;
+}
+
+function decodeHistory(raw) {
+  const bytes = bytesOf(raw);
+  if (!bytes) return [];
+
+  // New records are bounded raw UTF-8 JSON. Avoid synchronous compression work on
+  // the alert-producing path: CPU is much scarcer than the <=96 KiB history value.
+  try {
+    return normalizeEvents(JSON.parse(DECODER.decode(bytes)));
+  } catch {
+    // Migration compatibility for history written by versions that stored Brotli.
+    const decompressed = brotliDecompressSync(bytes);
+    return normalizeEvents(JSON.parse(DECODER.decode(decompressed)));
+  }
+}
+
 export async function readAlertHistory(env, limit = MAX_EVENTS) {
   if (!env.STATE) return [];
   const raw = await env.STATE.get(HISTORY_KEY, { type: "arrayBuffer" });
   if (!raw) return [];
   try {
-    const decompressed = brotliDecompressSync(new Uint8Array(raw));
-    const parsed = JSON.parse(DECODER.decode(decompressed));
-    return normalizeEvents(parsed).slice(0, Math.max(0, limit));
+    return decodeHistory(raw).slice(0, Math.max(0, limit));
   } catch (error) {
     console.error("alert history decode failed", error);
     return [];
   }
 }
 
-export async function appendAlertEvent(env, event) {
+export async function appendAlertEvents(env, events) {
   if (!env.STATE) return { archived: false, reason: "state_unavailable" };
-  const safe = sanitizeEvent(event);
-  if (!safe) return { archived: false, reason: "invalid_event" };
+  const safeEvents = (Array.isArray(events) ? events : [events]).map(sanitizeEvent).filter(Boolean);
+  if (!safeEvents.length) return { archived: false, reason: "invalid_event" };
   const existing = await readAlertHistory(env);
-  const encoded = encodeHistory([safe, ...existing]);
+  const encoded = encodeHistory([...safeEvents, ...existing]);
   await env.STATE.put(HISTORY_KEY, encoded.bytes);
   return {
     archived: true,
+    added: safeEvents.length,
     count: encoded.events.length,
     rawBytes: encoded.rawBytes,
-    compressedBytes: encoded.compressedBytes,
+    storedBytes: encoded.storedBytes,
   };
+}
+
+export async function appendAlertEvent(env, event) {
+  return appendAlertEvents(env, [event]);
 }
 
 export function historyEventForWatchResult(result, at = new Date()) {
@@ -202,5 +221,6 @@ export const alertHistoryConfig = Object.freeze({
   key: HISTORY_KEY,
   maxEvents: MAX_EVENTS,
   maxJsonBytes: MAX_JSON_BYTES,
-  brotliQuality: BROTLI_QUALITY,
+  encoding: "json-utf8",
+  legacyBrotliRead: true,
 });

@@ -52,3 +52,19 @@ npm run bench
 ```
 
 The bot token and admin token are never committed and must be installed as Cloudflare Worker secrets.
+
+## Incremental self-test — 2026-08-21 caller cancellation hardening
+
+Issue #3 adds an explicit cancellation contract to resilient source GETs: caller aborts are composed with each attempt's fresh timeout signal, pre-aborted requests do not start, and caller-driven aborts are not retried as transient upstream failures.
+
+Targeted branch-local evidence executed against the changed module/test pair on Node 22.16.0:
+
+```bash
+node --check src/resilient-fetch.js
+node --check test/resilient-fetch.test.js
+node --test test/resilient-fetch.test.js
+```
+
+Result: 5/5 targeted tests passed, covering transient timeout retry, transient 5xx retry, in-flight caller cancellation (one attempt), pre-aborted caller cancellation (zero attempts), and non-retrying POST behavior.
+
+This incremental record does **not** replace the 2026-08-19 full-suite baseline above. `npm run validate`, coverage, benchmarks, deployed Worker metrics, and human acceptance were not rerun as part of this connector-driven change and remain pending for the draft PR review.
