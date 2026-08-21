@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { brotliCompressSync } from "node:zlib";
 import {
   alertHistoryConfig,
   appendAlertEvent,
+  appendAlertEvents,
   historyEventForFailure,
   historyEventForRecovery,
   historyEventForWatchResult,
@@ -11,16 +13,22 @@ import {
 
 class FakeKV {
   map = new Map();
+  writes = [];
   async get(key, options) {
     const value = this.map.get(key);
     if (value == null) return null;
     return options?.type === "json" ? JSON.parse(value) : value;
   }
-  async put(key, value) { this.map.set(key, value); }
+  async put(key, value) {
+    this.writes.push(key);
+    this.map.set(key, value);
+  }
 }
 const env = () => ({ STATE: new FakeKV() });
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
-test("alert history is stored as Brotli-compressed binary and round-trips", async () => {
+test("alert history is stored as bounded raw JSON and round-trips", async () => {
   const e = env();
   const event = historyEventForWatchResult({
     status: "changed",
@@ -28,12 +36,51 @@ test("alert history is stored as Brotli-compressed binary and round-trips", asyn
   }, new Date("2026-08-20T19:00:00Z"));
   const result = await appendAlertEvent(e, event);
   assert.equal(result.archived, true);
-  assert(result.compressedBytes < result.rawBytes);
-  assert(e.STATE.map.get(alertHistoryConfig.key) instanceof ArrayBuffer);
+  assert.equal(result.storedBytes, result.rawBytes);
+  assert(result.storedBytes <= alertHistoryConfig.maxJsonBytes);
+  const stored = e.STATE.map.get(alertHistoryConfig.key);
+  assert(stored instanceof ArrayBuffer);
+  assert.doesNotThrow(() => JSON.parse(decoder.decode(new Uint8Array(stored))));
   const history = await readAlertHistory(e);
   assert.equal(history.length, 1);
   assert.match(history[0].title, /PRICING UPDATE/);
   assert.match(history[0].message, /0\.66 → 1\.32/);
+});
+
+test("legacy Brotli history remains readable after the raw-JSON migration", async () => {
+  const e = env();
+  const legacy = {
+    schema: 1,
+    events: [{
+      id: "legacy",
+      at: "2026-08-20T18:00:00.000Z",
+      kind: "change",
+      severity: "info",
+      title: "legacy compressed event",
+      detail: "before migration",
+      count: 1,
+      changes: [],
+      message: "legacy payload",
+    }],
+  };
+  const compressed = brotliCompressSync(encoder.encode(JSON.stringify(legacy)));
+  e.STATE.map.set(alertHistoryConfig.key, compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength));
+  const history = await readAlertHistory(e);
+  assert.equal(history.length, 1);
+  assert.equal(history[0].title, "legacy compressed event");
+});
+
+test("batched archive appends multiple events with one KV write", async () => {
+  const e = env();
+  const result = await appendAlertEvents(e, [
+    { at: "2026-08-20T19:00:00Z", title: "go change", kind: "change", severity: "info" },
+    { at: "2026-08-20T19:00:00Z", title: "zen change", kind: "zen-change", severity: "info" },
+  ]);
+  assert.equal(result.archived, true);
+  assert.equal(result.added, 2);
+  assert.equal(e.STATE.writes.length, 1);
+  const history = await readAlertHistory(e);
+  assert.deepEqual(history.map((event) => event.title), ["go change", "zen change"]);
 });
 
 test("history keeps newest-first order and caps the rolling event count", async () => {
