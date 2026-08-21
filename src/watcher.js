@@ -19,7 +19,7 @@ const SNAPSHOT_KEY = "snapshot:v1";
 const HOT_KEY = "hot:v1";
 const META_KEY = "meta:v1";
 const ERROR_KEY = "error:v1";
-const SNAPSHOT_SCHEMA = 3;
+const SNAPSHOT_SCHEMA = 4;
 const ERROR_REPEAT_MS = 6 * 60 * 60 * 1000;
 const HEARTBEAT_MS = 60 * 60 * 1000;
 const MAX_PAGE_BYTES = 5_000_000;
@@ -42,11 +42,25 @@ export function validateSnapshot(snapshot) {
   if (countKeys(snapshot.docs?.limits) !== 3) errors.push("docs dollar limits are incomplete");
 
   for (const [name, row] of Object.entries(snapshot.docs?.requests ?? {})) {
+    if (row.unlimited === true) {
+      for (const field of ["requests5h", "requestsWeek", "requestsMonth"]) {
+        if (row[field] != null) errors.push(`${name}.${field} must be null for an unlimited/quota-exempt model`);
+      }
+      continue;
+    }
     for (const field of ["requests5h", "requestsWeek", "requestsMonth"]) {
       if (!Number.isSafeInteger(row[field]) || row[field] <= 0) errors.push(`${name}.${field} is invalid`);
     }
     if (row.requestsWeek < row.requests5h) errors.push(`${name}: weekly estimate is below 5-hour estimate`);
     if (row.requestsMonth < row.requestsWeek) errors.push(`${name}: monthly estimate is below weekly estimate`);
+  }
+
+  for (const [name, row] of Object.entries(snapshot.go?.chart ?? {})) {
+    if (row.unlimited === true) {
+      if (row.requests5h != null) errors.push(`${name}.requests5h must be null for an infinite Go-chart entry`);
+    } else if (!Number.isSafeInteger(row.requests5h) || row.requests5h <= 0) {
+      errors.push(`${name}.requests5h is invalid`);
+    }
   }
 
   if (errors.length) throw new Error(`Snapshot validation failed: ${errors.join("; ")}`);
