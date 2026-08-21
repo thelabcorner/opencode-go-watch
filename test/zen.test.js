@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildZenSnapshot, diffZenSnapshots, parseZenDocs, parseZenModelsApi, runZenWatch, validateZenSnapshot } from "../src/zen.js";
-import { buildZenChangeMessages } from "../src/zen-telegram.js";
+import { buildZenChangeMessages, sendZenTelegram, zenKeyboard } from "../src/zen-telegram.js";
 import { zenDashboard } from "../src/zen-dashboard.js";
 
 function table(headers, rows) {
@@ -120,6 +120,27 @@ test("Zen dashboard prioritizes free models and renders real maker logo URLs", (
   assert.match(body, /models\.dev\/logos\/tencent\.svg/);
   assert.match(body, /zen-dashboard\.js/);
   assert.match(body, /@media\(max-width:540px\)/);
+});
+
+test("Zen Telegram cards include the configured Zen watcher dashboard button", async () => {
+  let request;
+  const fakeFetch = async (url, init) => {
+    request = { url, init };
+    return new Response('{"ok":true,"result":{}}', { status: 200 });
+  };
+  const env = {
+    TELEGRAM_BOT_TOKEN: "TOKEN",
+    TELEGRAM_CHAT_ID: "42",
+    WATCHER_DASHBOARD_URL: "https://opencode-go-watch.thedabcorner.workers.dev/",
+  };
+  await sendZenTelegram(env, "<b>hello</b>", fakeFetch);
+  const body = JSON.parse(request.init.body);
+  assert.deepEqual(body.reply_markup.inline_keyboard[0], [{
+    text: "🛰 Zen Watcher Dashboard",
+    url: "https://opencode-go-watch.thedabcorner.workers.dev/zen",
+  }]);
+  assert.equal(body.reply_markup.inline_keyboard[1].length, 2);
+  assert.equal(zenKeyboard({}).inline_keyboard.length, 1);
 });
 
 test("Zen watcher bootstraps from docs + API and then uses conditional 304 fast path", async () => {

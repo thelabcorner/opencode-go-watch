@@ -1,4 +1,4 @@
-import { resolveTelegramChatId } from "./telegram.js";
+import { resolveTelegramChatId, watcherDashboardUrl } from "./telegram.js";
 
 const MAX_MESSAGE = 3850;
 const NUMBER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
@@ -210,11 +210,15 @@ export function buildZenRecoveryMessage(previousError, checkedAt, timeZone = "Am
   return `✅ <b>OPENCODE ZEN WATCH · RECOVERED</b>\n━━━━━━━━━━━━━━━━━━━━\nZen models API and documentation are parsing successfully again.\n\nLast error\n<code>${esc(previousError?.message ?? "unknown")}</code>\n\n🕒 ${esc(time(checkedAt, timeZone))}`;
 }
 
-export function zenKeyboard() {
-  return { inline_keyboard: [[
+export function zenKeyboard(env = {}) {
+  const rows = [];
+  const dashboard = watcherDashboardUrl(env, "/zen");
+  if (dashboard) rows.push([{ text: "🛰 Zen Watcher Dashboard", url: dashboard }]);
+  rows.push([
     { text: "🧠 Zen Models", url: "https://opencode.ai/docs/zen/#models" },
     { text: "💰 Zen Pricing", url: "https://opencode.ai/docs/zen/#pricing" },
-  ]] };
+  ]);
+  return { inline_keyboard: rows };
 }
 
 export async function sendZenTelegram(env, html, fetchImpl = fetch) {
@@ -224,7 +228,7 @@ export async function sendZenTelegram(env, html, fetchImpl = fetch) {
   const response = await fetchImpl(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: html, parse_mode: "HTML", link_preview_options: { is_disabled: true }, reply_markup: zenKeyboard() }),
+    body: JSON.stringify({ chat_id: chatId, text: html, parse_mode: "HTML", link_preview_options: { is_disabled: true }, reply_markup: zenKeyboard(env) }),
     signal: AbortSignal.timeout(10_000),
   });
   const text = await response.text();

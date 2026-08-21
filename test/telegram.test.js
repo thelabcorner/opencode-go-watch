@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildBootMessage, buildChangeMessages, escapeHtml, sendTelegram, setupTelegram } from "../src/telegram.js";
+import { buildBootMessage, buildChangeMessages, escapeHtml, sendTelegram, setupTelegram, telegramKeyboard, watcherDashboardUrl } from "../src/telegram.js";
 
 test("escapes Telegram HTML", () => {
   assert.equal(escapeHtml('A < B & "C"'), "A &lt; B &amp; &quot;C&quot;");
@@ -46,17 +46,40 @@ test("new model lifecycle is rendered as one rich model card", () => {
   assert.doesNotMatch(messages[0], /PRICING ROW ADDED/);
 });
 
-test("Telegram sender posts HTML and inline keyboard", async () => {
+test("watcher dashboard URL is normalized and safely scoped", () => {
+  const env = { WATCHER_DASHBOARD_URL: "https://watch.example/base?x=1#hash" };
+  assert.equal(watcherDashboardUrl(env, "/"), "https://watch.example/");
+  assert.equal(watcherDashboardUrl(env, "/zen"), "https://watch.example/zen");
+  assert.equal(watcherDashboardUrl({ WATCHER_DASHBOARD_URL: "javascript:alert(1)" }), null);
+});
+
+test("Telegram sender posts HTML and watcher dashboard inline keyboard", async () => {
   let request;
   const fakeFetch = async (url, init) => {
     request = { url, init };
     return new Response('{"ok":true,"result":{}}', { status: 200 });
   };
-  await sendTelegram({ TELEGRAM_BOT_TOKEN: "TOKEN", TELEGRAM_CHAT_ID: "42" }, "<b>hello</b>", fakeFetch);
+  const env = {
+    TELEGRAM_BOT_TOKEN: "TOKEN",
+    TELEGRAM_CHAT_ID: "42",
+    WATCHER_DASHBOARD_URL: "https://opencode-go-watch.thedabcorner.workers.dev",
+  };
+  await sendTelegram(env, "<b>hello</b>", fakeFetch);
   assert.equal(request.url, "https://api.telegram.org/botTOKEN/sendMessage");
   const body = JSON.parse(request.init.body);
   assert.equal(body.parse_mode, "HTML");
-  assert.equal(body.reply_markup.inline_keyboard[0].length, 2);
+  assert.equal(body.reply_markup.inline_keyboard.length, 2);
+  assert.deepEqual(body.reply_markup.inline_keyboard[0], [{
+    text: "🛰 Watcher Dashboard",
+    url: "https://opencode-go-watch.thedabcorner.workers.dev/",
+  }]);
+  assert.equal(body.reply_markup.inline_keyboard[1].length, 2);
+});
+
+test("Telegram keyboard remains usable without dashboard configuration", () => {
+  const keyboard = telegramKeyboard({});
+  assert.equal(keyboard.inline_keyboard.length, 1);
+  assert.equal(keyboard.inline_keyboard[0].length, 2);
 });
 
 test("Telegram setup verifies bot, discovers private chat, stores id, and sends test", async () => {
