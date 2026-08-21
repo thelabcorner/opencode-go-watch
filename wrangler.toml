@@ -11,8 +11,11 @@ crons = ["*/5 * * * *"]
 [vars]
 OPENCODE_GO_URL = "https://opencode.ai/go"
 OPENCODE_DOCS_URL = "https://opencode.ai/docs/go/"
+OPENCODE_ZEN_DOCS_URL = "https://opencode.ai/docs/zen/"
+OPENCODE_ZEN_MODELS_URL = "https://opencode.ai/zen/v1/models"
 TIMEZONE = "America/Chicago"
 NOTIFY_ON_BOOTSTRAP = "true"
+NOTIFY_ON_ZEN_BOOTSTRAP = "true"
 
 # Wrangler 4 automatic resource provisioning creates and binds this namespace
 # on first remote deploy. Cloudflare keeps the provisioned namespace linked on
