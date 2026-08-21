@@ -20,6 +20,7 @@ const LABELS = Object.freeze({
   cachedWritePerM: "Cached write / 1M",
   usageUsd: "Included usage",
   bonus: "Promotion",
+  modelId: "Model ID",
   deepSeekPeakHours: "DeepSeek peak hours",
   limitsDisclaimer: "Limits disclaimer",
 });
@@ -172,12 +173,20 @@ function renderProfileChanges(model, changes) {
   return `🧠 <b>REQUEST PROFILE CHANGED</b>\n<b>${escapeHtml(model)}</b>\n${lines.join("\n")}`;
 }
 
+function modelId(value) {
+  const id = String(value ?? "").trim();
+  if (!id) return "none";
+  return id.includes("/") ? id : `opencode/${id}`;
+}
+
 function renderChartChanges(model, changes) {
+  const onlyModelId = changes.every((change) => change.field === "modelId");
   const lines = changes.map((change) => {
     if (change.field === "bonus") return `Promotion: <code>${escapeHtml(change.before ?? "none")} → ${escapeHtml(change.after ?? "none")}</code>`;
+    if (change.field === "modelId") return `Model ID: <code>${escapeHtml(modelId(change.before))} → ${escapeHtml(modelId(change.after))}</code>`;
     return `5 hour: <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code> ${direction(change.before, change.after)} ${fmtPercent(change.percent)}`.trim();
   });
-  return `📈 <b>GO CHART CHANGED</b>\n<b>${escapeHtml(model)}</b>\n${lines.join("\n")}`;
+  return `${onlyModelId ? "🪪 <b>GO MODEL ID CHANGED</b>" : "📈 <b>GO CHART CHANGED</b>"}\n<b>${escapeHtml(model)}</b>\n${lines.join("\n")}`;
 }
 
 function groupByKey(changes, type) {
@@ -307,6 +316,7 @@ function renderBlocks(changes, snapshot) {
 function headlineFor(changes) {
   const types = new Set(changes.map((change) => change.type));
   if (types.has("unclassified_source_change")) return "🟡 <b>OPENCODE GO · UNCLASSIFIED CHANGE</b>";
+  if (changes.length > 0 && changes.every((change) => change.type === "chart_changed" && change.field === "modelId")) return "🪪 <b>OPENCODE GO · MODEL ID CHANGED</b>";
   if (changes.filter((change) => change.type === "model_added").length === 1 && types.size <= 4) return "🆕 <b>OPENCODE GO · NEW MODEL</b>";
   if (changes.filter((change) => change.type === "model_removed").length === 1 && types.size <= 4) return "🗑 <b>OPENCODE GO · MODEL REMOVED</b>";
   if ([...types].some((type) => type.includes("pricing"))) return "💰 <b>OPENCODE GO · PRICING UPDATE</b>";
