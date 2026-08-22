@@ -4,34 +4,40 @@ on:
   push:
   pull_request:
 
-permissions:
-  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  validate-and-deploy:
+    runs-on: [self-hosted, homelab]
+    timeout-minutes: 15
+    env:
+      # persist npm cache in runner work volume (ext4, survives runs)
+      npm_config_cache: /_work/.npm
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --ignore-scripts --no-audit --no-fund
-      - run: npm run validate
-      - run: npm run test:coverage
-      - run: npm run cf:dry-run
+          cache: npm
 
-  deploy:
-    needs: validate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, homelab]
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
+      - name: Install deps (lockfile, offline-first)
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefer-offline
+
+      - name: Validate (check + typecheck + test)
+        run: npm run validate
+
+      - name: Wrangler dry-run build check
+        run: npm run cf:dry-run
+
       - name: Deploy to homelab
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          COMPOSE_BAKE: 'true'
         run: |
           docker compose -f "$GITHUB_WORKSPACE/compose.yml" up -d --build
           docker image prune -f
