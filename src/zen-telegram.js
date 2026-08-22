@@ -1,4 +1,5 @@
 import { resolveTelegramChatId, watcherDashboardUrl } from "./telegram.js";
+import { basePricingName, buildZenCheapnessRanking, cheapnessFor } from "./cost-ranking.js";
 
 const MAX_MESSAGE = 3850;
 const NUMBER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
@@ -43,7 +44,22 @@ function priceLabel(field) {
   return ({ inputPerM: "Input", outputPerM: "Output", cachedReadPerM: "Cached read", cachedWritePerM: "Cached write" })[field] ?? field;
 }
 
-function lifecycleBlocks(changes) {
+function rankLabel(entry) {
+  const tie = entry.tieCount > 1 ? ` · ${entry.tieCount}-way tie` : "";
+  return `#${entry.rank} of ${entry.total} ranked${tie}`;
+}
+
+function zenCheapnessLine(ranking, model) {
+  const name = typeof model === "string" ? model : model?.name ?? model?.id;
+  const entry = cheapnessFor(ranking, name);
+  if (!entry) return `💸 <b>Cheapness</b>  <i>pending published pricing</i>`;
+  if (entry.free) return `💸 <b>Cheapness</b>  <code>${rankLabel(entry)}</code> · <b>Free</b>`;
+  const range = entry.maxCost > entry.minCost ? `${money(entry.minCost)}–${money(entry.maxCost)}` : money(entry.minCost);
+  const tier = entry.variantCount > 1 ? ` · ${entry.variantCount} tiers ${range}` : "";
+  return `💸 <b>Cheapness</b>  <code>${rankLabel(entry)}</code> · price index <b>${money(entry.minCost)}</b>${tier}\n<i>Index = input + output + cached-read rates; rank uses the cheapest published tier.</i>`;
+}
+
+function lifecycleBlocks(changes, ranking) {
   const blocks = [];
   const consumed = new Set();
   changes.forEach((change, index) => {
@@ -69,6 +85,7 @@ function lifecycleBlocks(changes) {
     blocks.push([
       `${icon} <b>${title}</b>`,
       modelLine(model),
+      added ? zenCheapnessLine(ranking, model) : "",
       free ? `<b>${added ? "Free access is now available" : "Free access was removed"}</b>` : "",
       associated.some((item) => item.type.includes("pricing")) ? `💰 ${added ? "Pricing row published" : "Pricing row removed"}` : "",
     ].filter(Boolean).join("\n"));
@@ -76,8 +93,9 @@ function lifecycleBlocks(changes) {
   return { blocks, consumed };
 }
 
-function renderBlocks(changes) {
-  const { blocks, consumed } = lifecycleBlocks(changes);
+function renderBlocks(changes, snapshot) {
+  const ranking = buildZenCheapnessRanking(snapshot);
+  const { blocks, consumed } = lifecycleBlocks(changes, ranking);
   const priceGroups = new Map();
   changes.forEach((change, index) => {
     if (consumed.has(index) || change.type !== "zen_price_changed") return;
@@ -87,7 +105,7 @@ function renderBlocks(changes) {
   for (const [row, group] of priceGroups) {
     group.forEach((item) => consumed.add(item.__index));
     const discount = group.some((item) => typeof item.before === "number" && typeof item.after === "number" && item.after < item.before);
-    blocks.push(`${discount ? "🏷️" : "💰"} <b>${discount ? "ZEN PRICE DROP" : "ZEN PRICING CHANGED"}</b>\n<b>${esc(row)}</b>\n${group.map((item) => `${priceLabel(item.field)}: <code>${money(item.before)} → ${money(item.after)}</code>${item.percent == null ? "" : `  ${item.after < item.before ? "▼" : "▲"} ${pct(item.percent)}`}`).join("\n")}`);
+    blocks.push(`${discount ? "🏷️" : "💰"} <b>${discount ? "ZEN PRICE DROP" : "ZEN PRICING CHANGED"}</b>\n<b>${esc(row)}</b>\n${zenCheapnessLine(ranking, basePricingName(row))}\n${group.map((item) => `${priceLabel(item.field)}: <code>${money(item.before)} → ${money(item.after)}</code>${item.percent == null ? "" : `  ${item.after < item.before ? "▼" : "▲"} ${pct(item.percent)}`}`).join("\n")}`);
   }
 
   changes.forEach((change, index) => {
@@ -95,16 +113,16 @@ function renderBlocks(changes) {
     consumed.add(index);
     switch (change.type) {
       case "zen_model_became_free":
-        blocks.push(`🆓 <b>MODEL BECAME FREE</b>\n${modelLine(change.after)}\n<b>Paid → Free</b>`);
+        blocks.push(`🆓 <b>MODEL BECAME FREE</b>\n${modelLine(change.after)}\n${zenCheapnessLine(ranking, change.after)}\n<b>Paid → Free</b>`);
         break;
       case "zen_model_no_longer_free":
-        blocks.push(`💳 <b>MODEL NO LONGER FREE</b>\n${modelLine(change.after ?? change.before)}\n<b>Free → Paid</b>`);
+        blocks.push(`💳 <b>MODEL NO LONGER FREE</b>\n${modelLine(change.after ?? change.before)}\n${zenCheapnessLine(ranking, change.after ?? change.before)}\n<b>Free → Paid</b>`);
         break;
       case "zen_pricing_row_added":
-        blocks.push(`💰 <b>ZEN PRICING ROW ADDED</b>\n<b>${esc(change.key)}</b>\n<code>in ${money(change.after?.inputPerM)} · out ${money(change.after?.outputPerM)} · cache ${money(change.after?.cachedReadPerM)}</code>`);
+        blocks.push(`💰 <b>ZEN PRICING ROW ADDED</b>\n<b>${esc(change.key)}</b>\n${zenCheapnessLine(ranking, basePricingName(change.key))}\n<code>in ${money(change.after?.inputPerM)} · out ${money(change.after?.outputPerM)} · cache ${money(change.after?.cachedReadPerM)}</code>`);
         break;
       case "zen_pricing_row_removed":
-        blocks.push(`🧹 <b>ZEN PRICING ROW REMOVED</b>\n<b>${esc(change.key)}</b>`);
+        blocks.push(`🧹 <b>ZEN PRICING ROW REMOVED</b>\n<b>${esc(change.key)}</b>\n${zenCheapnessLine(ranking, basePricingName(change.key))}`);
         break;
       case "zen_endpoint_added":
         blocks.push(`🔌 <b>ZEN ENDPOINT ADDED</b>\n${modelLine(change.after)}`);
@@ -169,7 +187,7 @@ function headline(changes) {
 }
 
 export function buildZenChangeMessages(changes, snapshot, timeZone = "America/Chicago") {
-  const blocks = renderBlocks(changes);
+  const blocks = renderBlocks(changes, snapshot);
   const header = `${headline(changes)}\n━━━━━━━━━━━━━━━━━━━━\n<b>${changes.length}</b> semantic field change${changes.length === 1 ? "" : "s"} · <b>${blocks.length}</b> update card${blocks.length === 1 ? "" : "s"}`;
   const footer = `\n\n🕒 ${esc(time(snapshot.checkedAt, timeZone))}\n🔎 Zen models API + Zen docs`;
   const out = [];
