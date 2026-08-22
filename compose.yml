@@ -1,0 +1,29 @@
+name: opencode-go-watch
+networks:
+  homelab-net:
+    external: true
+
+services:
+  app:
+    build: .
+    container_name: opencode-go-watch
+    restart: unless-stopped
+    networks: [homelab-net]
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+    volumes:
+      - watch-kv:/app/.wrangler/state   # KV (STATE binding) persistence
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.watch.rule=Host(`watch.lab.example.com`)
+      - traefik.http.routers.watch.entrypoints=web
+      - traefik.http.services.watch.loadbalancer.server.port=8787
+
+volumes:
+  watch-kv:

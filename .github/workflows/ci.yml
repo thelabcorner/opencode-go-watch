@@ -20,3 +20,20 @@ jobs:
       - run: npm run validate
       - run: npm run test:coverage
       - run: npm run cf:dry-run
+
+  deploy:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, homelab]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to homelab
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          docker compose -f "$GITHUB_WORKSPACE/compose.yml" up -d --build
+          docker image prune -f
+          sleep 8
+          docker ps --filter name=opencode-go-watch --format "{{.Names}}: {{.Status}}"
