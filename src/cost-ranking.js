@@ -94,14 +94,12 @@ export function buildGoCheapnessRanking(snapshot) {
       continue;
     }
 
+    // Keep one unit across the entire Go ranking. OpenCode publishes a model-specific
+    // typical-request token profile, so ranked paid models use estimated dollars per
+    // typical request. A model without enough profile/pricing data stays unranked
+    // instead of mixing an arbitrary token-price index into the same ordinal list.
     const requestCosts = rows.map((row) => typicalRequestCost(profile, row)).filter((value) => value != null);
-    if (requestCosts.length) {
-      entries.push(summarizeScores(name, requestCosts, "go-typical-request", requestCosts.every((value) => value === 0)));
-      continue;
-    }
-
-    const neutral = rows.map(neutralPriceScore).filter((value) => value != null);
-    if (neutral.length) entries.push(summarizeScores(name, neutral, "token-price-index", neutral.every((value) => value === 0)));
+    if (requestCosts.length) entries.push(summarizeScores(name, requestCosts, "go-typical-request", requestCosts.every((value) => value === 0)));
   }
   return rank(entries);
 }
@@ -114,6 +112,10 @@ export function buildZenCheapnessRanking(snapshot) {
       entries.push(summarizeScores(model.name ?? model.id, [0], "zen-free", true));
       continue;
     }
+    // Zen does not publish one comparable typical-request profile for every model.
+    // Use a transparent neutral basket of the uniformly meaningful published rates:
+    // input + output + cached read. Cached write is excluded because many models do
+    // not expose it, which would otherwise penalize only the models that do.
     const scores = rows.map(neutralPriceScore).filter((value) => value != null);
     if (scores.length) entries.push(summarizeScores(model.name ?? model.id, scores, "token-price-index", false));
   }
