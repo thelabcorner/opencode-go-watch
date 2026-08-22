@@ -1,0 +1,14 @@
+# runtime image needs only: src/, package.json, package-lock.json, wrangler.toml
+node_modules
+.wrangler
+.dev.vars
+.env
+data
+.git
+.github
+.opencode
+test
+bench
+coverage
+*.md
+VALIDATION.md
