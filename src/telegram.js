@@ -1,8 +1,10 @@
 import { canonicalModelKey, deriveConsistency } from "./parsers.js";
+import { basePricingName, buildGoCheapnessRanking, cheapnessFor } from "./cost-ranking.js";
 
 const MAX_MESSAGE = 3850;
 const CHAT_ID_KEY = "telegram:chat_id:v1";
 const NUMBER_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
+const COST_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 });
 const TIME_FORMATTERS = new Map();
 const LABELS = Object.freeze({
   fiveHourUsd: "5 hour",
@@ -39,6 +41,12 @@ function fmtNumber(value) {
   return typeof value === "number" ? NUMBER_FORMATTER.format(value) : "—";
 }
 function fmtMoney(value) { return typeof value === "number" ? `$${NUMBER_FORMATTER.format(value)}` : "—"; }
+function fmtCost(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  if (value === 0) return "$0";
+  if (Math.abs(value) < 0.00000001) return `$${value.toExponential(2)}`;
+  return `$${COST_FORMATTER.format(value)}`;
+}
 function fmtPercent(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
   const sign = value > 0 ? "+" : "";
@@ -77,7 +85,6 @@ function profileLine(profile) {
   if (!profile) return "";
   return `🧠 <b>Typical request</b>  in <code>${fmtNumber(profile.inputTokens)}</code> · cached <code>${fmtNumber(profile.cachedTokens)}</code> · out <code>${fmtNumber(profile.outputTokens)}</code>`;
 }
-function basePricingName(name) { return String(name ?? "").replace(/\s*\([^)]*\)\s*$/, "").trim(); }
 function pricingForModel(snapshot, model) {
   const wanted = canonicalModelKey(model);
   return Object.entries(snapshot.docs.pricing ?? {}).filter(([name]) => canonicalModelKey(basePricingName(name)) === wanted);
@@ -96,13 +103,25 @@ function pricingSummary(rows, maxRows = 3) {
   if (rows.length > maxRows) shown.push(`• …and ${rows.length - maxRows} more pricing row${rows.length - maxRows === 1 ? "" : "s"}`);
   return `💰 <b>Pricing / 1M tokens</b>\n${shown.join("\n")}`;
 }
+function rankLabel(entry) {
+  const tie = entry.tieCount > 1 ? ` · ${entry.tieCount}-way tie` : "";
+  return `#${entry.rank} of ${entry.total} ranked${tie}`;
+}
+function goCheapnessLine(ranking, model) {
+  const entry = cheapnessFor(ranking, model);
+  if (!entry) return `💸 <b>Cheapness</b>  <i>pending pricing/profile</i>`;
+  if (entry.free) return `💸 <b>Cheapness</b>  <code>${rankLabel(entry)}</code> · <b>$0 published Go cost</b>`;
+  const range = entry.maxCost > entry.minCost ? `${fmtCost(entry.minCost)}–${fmtCost(entry.maxCost)}` : fmtCost(entry.minCost);
+  const tierNote = entry.variantCount > 1 ? `\n<i>Rank uses the cheapest published tier; ${entry.variantCount} pricing variants span ${range}.</i>` : "";
+  return `💸 <b>Cheapness</b>  <code>${rankLabel(entry)}</code> · ~<b>${fmtCost(entry.minCost)}</b> / typical request${tierNote}`;
+}
 function related(change, model) {
   const wanted = canonicalModelKey(model);
   if (!change.key) return false;
   return canonicalModelKey(basePricingName(change.key)) === wanted || canonicalModelKey(change.key) === wanted;
 }
 
-function renderModelAdded(change, snapshot) {
+function renderModelAdded(change, snapshot, ranking) {
   const model = change.key;
   const chart = chartForModel(snapshot, model);
   const pricing = pricingForModel(snapshot, model);
@@ -110,6 +129,7 @@ function renderModelAdded(change, snapshot) {
   const parts = [
     unlimited ? `♾️ <b>UNLIMITED GO MODEL ADDED</b>` : `🆕 <b>MODEL ADDED</b>`,
     `<b>${escapeHtml(model)}</b>`,
+    goCheapnessLine(ranking, model),
     requestGrid(change.after),
   ];
   if (chart) parts.push(`📈 <b>Go chart</b>  <code>${chart.unlimited ? "∞" : fmtNumber(chart.requests5h)}</code> / 5h${chart.bonus ? `  ·  🎁 ${escapeHtml(chart.bonus)}` : ""}`);
@@ -129,32 +149,32 @@ function renderModelRemoved(change, relatedChanges) {
   ].filter(Boolean).join("\n");
 }
 
-function renderRequestChanges(model, changes) {
+function renderRequestChanges(model, changes, ranking) {
   const lines = changes.map((change) => {
     if (change.field === "unlimited") return `${labelField(change.field)}: <code>${limitMode(change.before)} → ${limitMode(change.after)}</code>`;
     const pct = fmtPercent(change.percent);
     return `${labelField(change.field).padEnd(8)} <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code>  ${direction(change.before, change.after)}${pct ? ` ${pct}` : ""}`;
   });
   const modeChange = changes.some((change) => change.field === "unlimited");
-  return `${modeChange ? "♾️ <b>GO ALLOWANCE MODE CHANGED</b>" : "📊 <b>REQUEST LIMIT CHANGED</b>"}\n<b>${escapeHtml(model)}</b>\n${lines.join("\n")}`;
+  return `${modeChange ? "♾️ <b>GO ALLOWANCE MODE CHANGED</b>" : "📊 <b>REQUEST LIMIT CHANGED</b>"}\n<b>${escapeHtml(model)}</b>\n${goCheapnessLine(ranking, model)}\n${lines.join("\n")}`;
 }
-function renderPricingChanges(rowName, changes) {
+function renderPricingChanges(rowName, changes, ranking) {
   const lines = changes.map((change) => {
     const pct = fmtPercent(change.percent);
     return `${labelField(change.field)}: <code>${fmtMoney(change.before)} → ${fmtMoney(change.after)}</code> ${direction(change.before, change.after)}${pct ? ` ${pct}` : ""}`;
   });
-  return `💰 <b>PRICING CHANGED</b>\n<b>${escapeHtml(rowName)}</b>\n${lines.join("\n")}`;
+  return `💰 <b>PRICING CHANGED</b>\n<b>${escapeHtml(rowName)}</b>\n${goCheapnessLine(ranking, basePricingName(rowName))}\n${lines.join("\n")}`;
 }
-function renderProfileChanges(model, changes) {
+function renderProfileChanges(model, changes, ranking) {
   const lines = changes.map((change) => `${labelField(change.field)}: <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code> ${direction(change.before, change.after)} ${fmtPercent(change.percent)}`.trim());
-  return `🧠 <b>REQUEST PROFILE CHANGED</b>\n<b>${escapeHtml(model)}</b>\n${lines.join("\n")}`;
+  return `🧠 <b>REQUEST PROFILE CHANGED</b>\n<b>${escapeHtml(model)}</b>\n${goCheapnessLine(ranking, model)}\n${lines.join("\n")}`;
 }
 function modelId(value) {
   const id = String(value ?? "").trim();
   if (!id) return "none";
   return id.includes("/") ? id : `opencode/${id}`;
 }
-function renderChartChanges(model, changes) {
+function renderChartChanges(model, changes, ranking) {
   const onlyModelId = changes.every((change) => change.field === "modelId");
   const hasUnlimited = changes.some((change) => change.field === "unlimited");
   const lines = changes.map((change) => {
@@ -164,7 +184,7 @@ function renderChartChanges(model, changes) {
     return `5 hour: <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code> ${direction(change.before, change.after)} ${fmtPercent(change.percent)}`.trim();
   });
   const title = onlyModelId ? "🪪 <b>GO MODEL ID CHANGED</b>" : hasUnlimited ? "♾️ <b>GO ALLOWANCE MODE CHANGED</b>" : "📈 <b>GO CHART CHANGED</b>";
-  return `${title}\n<b>${escapeHtml(model)}</b>\n${lines.join("\n")}`;
+  return `${title}\n<b>${escapeHtml(model)}</b>${hasUnlimited ? `\n${goCheapnessLine(ranking, model)}` : ""}\n${lines.join("\n")}`;
 }
 function groupByKey(changes, type) {
   const groups = new Map();
@@ -175,6 +195,7 @@ function groupByKey(changes, type) {
 function renderBlocks(changes, snapshot) {
   const consumed = new Set();
   const blocks = [];
+  const ranking = buildGoCheapnessRanking(snapshot);
   changes.forEach((change, index) => {
     if (change.type !== "model_added" && change.type !== "model_removed") return;
     consumed.add(index);
@@ -184,19 +205,19 @@ function renderBlocks(changes, snapshot) {
       const lifecycle = change.type === "model_added" ? ["request_profile_added", "pricing_row_added", "chart_model_added"] : ["request_profile_removed", "pricing_row_removed", "chart_model_removed"];
       if (lifecycle.includes(other.type) && related(other, change.key)) { associated.push(other); consumed.add(otherIndex); }
     });
-    blocks.push(change.type === "model_added" ? renderModelAdded(change, snapshot) : renderModelRemoved(change, associated));
+    blocks.push(change.type === "model_added" ? renderModelAdded(change, snapshot, ranking) : renderModelRemoved(change, associated));
   });
   for (const [model, group] of groupByKey(changes, "request_limit_changed")) {
-    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderRequestChanges(model, active));
+    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderRequestChanges(model, active, ranking));
   }
   for (const [name, group] of groupByKey(changes, "pricing_changed")) {
-    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderPricingChanges(name, active));
+    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderPricingChanges(name, active, ranking));
   }
   for (const [model, group] of groupByKey(changes, "request_profile_changed")) {
-    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderProfileChanges(model, active));
+    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderProfileChanges(model, active, ranking));
   }
   for (const [model, group] of groupByKey(changes, "chart_changed")) {
-    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderChartChanges(model, active));
+    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderChartChanges(model, active, ranking));
   }
 
   const global = changes.map((change, index) => ({ ...change, __index: index })).filter((item) => item.type === "global_limit_changed" && !consumed.has(item.__index));
@@ -206,11 +227,11 @@ function renderBlocks(changes, snapshot) {
     if (consumed.has(index)) return;
     consumed.add(index);
     switch (change.type) {
-      case "request_profile_added": blocks.push(`🧠 <b>REQUEST PROFILE ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${profileLine(change.after)}`); break;
-      case "request_profile_removed": blocks.push(`🧠 <b>REQUEST PROFILE REMOVED</b>\n<b>${escapeHtml(change.key)}</b>`); break;
-      case "pricing_row_added": blocks.push(`💰 <b>PRICING ROW ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${pricingSummary([[change.key, change.after]], 1)}`); break;
-      case "pricing_row_removed": blocks.push(`🧹 <b>PRICING ROW REMOVED</b>\n<b>${escapeHtml(change.key)}</b>`); break;
-      case "chart_model_added": blocks.push(`${change.after?.unlimited ? "♾️ <b>UNLIMITED GO CHART MODEL ADDED</b>" : "🟢 <b>GO CHART MODEL ADDED</b>"}\n<b>${escapeHtml(change.key)}</b>\n<code>${fmtRequest(change.after)}</code> requests / 5h${change.after?.unlimited ? "\n<i>Go quota-exempt; separate free-model rate limits may still apply.</i>" : ""}${change.after?.bonus ? `\n🎁 ${escapeHtml(change.after.bonus)}` : ""}`); break;
+      case "request_profile_added": blocks.push(`🧠 <b>REQUEST PROFILE ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${goCheapnessLine(ranking, change.key)}\n${profileLine(change.after)}`); break;
+      case "request_profile_removed": blocks.push(`🧠 <b>REQUEST PROFILE REMOVED</b>\n<b>${escapeHtml(change.key)}</b>\n${goCheapnessLine(ranking, change.key)}`); break;
+      case "pricing_row_added": blocks.push(`💰 <b>PRICING ROW ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${goCheapnessLine(ranking, basePricingName(change.key))}\n${pricingSummary([[change.key, change.after]], 1)}`); break;
+      case "pricing_row_removed": blocks.push(`🧹 <b>PRICING ROW REMOVED</b>\n<b>${escapeHtml(change.key)}</b>\n${goCheapnessLine(ranking, basePricingName(change.key))}`); break;
+      case "chart_model_added": blocks.push(`${change.after?.unlimited ? "♾️ <b>UNLIMITED GO CHART MODEL ADDED</b>" : "🟢 <b>GO CHART MODEL ADDED</b>"}\n<b>${escapeHtml(change.key)}</b>\n${change.after?.unlimited ? `${goCheapnessLine(ranking, change.key)}\n` : ""}<code>${fmtRequest(change.after)}</code> requests / 5h${change.after?.unlimited ? "\n<i>Go quota-exempt; separate free-model rate limits may still apply.</i>" : ""}${change.after?.bonus ? `\n🎁 ${escapeHtml(change.after.bonus)}` : ""}`); break;
       case "chart_model_removed": blocks.push(`${change.before?.unlimited ? "♾️ <b>UNLIMITED GO CHART MODEL REMOVED</b>" : "🔴 <b>GO CHART MODEL REMOVED</b>"}\n<b>${escapeHtml(change.key)}</b>\nwas <code>${fmtRequest(change.before)}</code> requests / 5h`); break;
       case "promo_banner_changed": blocks.push(`🎁 <b>PROMOTION BANNER CHANGED</b>\n<code>${escapeHtml(change.before ?? "none")}</code>\n↓\n<code>${escapeHtml(change.after ?? "none")}</code>`); break;
       case "consistency_mismatch": blocks.push(`⚠️ <b>CHART / DOCS MISMATCH</b>\n<b>${escapeHtml(change.key)}</b>\nchart <code>${change.after?.chartUnlimited ? "∞" : fmtNumber(change.after?.chart)}</code> · docs <code>${change.after?.docsUnlimited ? "∞" : fmtNumber(change.after?.docs)}</code>`); break;
