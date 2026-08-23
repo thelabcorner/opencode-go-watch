@@ -15,7 +15,7 @@ services:
     volumes:
       - watch-kv:/app/.wrangler/state   # KV (STATE binding) persistence
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/status"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
       interval: 30s
       timeout: 5s
       retries: 3
