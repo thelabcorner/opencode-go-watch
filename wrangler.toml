@@ -30,7 +30,7 @@ enabled = false
 enabled = true
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/1 * * * *"]
 
 [vars]
 OPENCODE_GO_URL = "https://opencode.ai/go"
