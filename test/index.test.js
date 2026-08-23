@@ -74,7 +74,7 @@ test("public root renders the responsive status dashboard", async () => {
   assert.match(body, /go\/watch/);
   assert.match(body, /dashboard\.js/);
   assert.match(body, /Last persisted heartbeat/);
-  assert.match(body, /Checks run every 5m/);
+  assert.match(body, /Checks run every 1m/);
   assert.match(body, /@media\(max-width:780px\)/);
   assert.match(body, /@media\(max-width:520px\)/);
   assert.doesNotMatch(body, /secret-admin|TOKEN/);
