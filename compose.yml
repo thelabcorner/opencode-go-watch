@@ -25,5 +25,21 @@ services:
       - traefik.http.routers.watch.entrypoints=web
       - traefik.http.services.watch.loadbalancer.server.port=8787
 
+  cron:
+    image: curlimages/curl:latest
+    container_name: opencode-go-watch-cron
+    restart: unless-stopped
+    networks: [homelab-net]
+    depends_on: [app]
+    environment:
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+    entrypoint: >
+      sh -c 'while true; do
+        curl -s -o /dev/null -X POST -H "Authorization: Bearer $ADMIN_TOKEN" http://app:8787/check;
+        echo "$(date -u) fired /check";
+        sleep 300;
+      done'
+    labels: { traefik.enable: "false" }
+
 volumes:
   watch-kv:
