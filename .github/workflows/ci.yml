@@ -40,5 +40,33 @@ jobs:
         run: |
           docker compose -f "$GITHUB_WORKSPACE/compose.yml" up -d --build
           docker image prune -f
-          sleep 8
+          docker ps --filter name=opencode-go-watch --format "{{.Names}}: {{.Status}}"
+
+          # The homelab uses `wrangler dev`, whose scheduled() handler is not fired
+          # automatically. The cron sidecar must bootstrap both Go and Zen. Treat a
+          # zero-model Zen state as a failed deployment instead of silently shipping it.
+          verified=0
+          for attempt in $(seq 1 36); do
+            if docker exec opencode-go-watch node -e '
+              Promise.all([
+                fetch("http://127.0.0.1:8787/health").then((r) => r.json()),
+                fetch("http://127.0.0.1:8787/zen/health").then((r) => r.json()),
+              ]).then(([go, zen]) => {
+                if (!go.ok || !(zen.modelCount > 0)) process.exit(1);
+                console.log(`Go healthy; Zen ${zen.modelCount} models (${zen.freeCount} free)`);
+              }).catch(() => process.exit(1));
+            '; then
+              verified=1
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$verified" != "1" ]; then
+            echo "Deployment verification failed: Go was unhealthy or Zen never populated a non-zero model baseline." >&2
+            docker logs --tail 120 opencode-go-watch || true
+            docker logs --tail 120 opencode-go-watch-cron || true
+            exit 1
+          fi
+
           docker ps --filter name=opencode-go-watch --format "{{.Names}}: {{.Status}}"
