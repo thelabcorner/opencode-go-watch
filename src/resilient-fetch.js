@@ -1,5 +1,5 @@
-const SOURCE_TIMEOUT_MS = 10_000;
-const SOURCE_ATTEMPTS = 2;
+const SOURCE_TIMEOUT_MS = 4_000;
+const SOURCE_ATTEMPTS = 3;
 
 function urlOf(input) {
   if (typeof input === "string") return input;
@@ -67,8 +67,8 @@ async function cancelBody(response) {
  *
  * Telegram sends are POSTs and intentionally bypass retries: retrying a POST after
  * an ambiguous network failure could duplicate an alert. Source GETs are idempotent,
- * so one retry is safe and prevents a single transient upstream stall from marking
- * the watcher degraded.
+ * so three total attempts (the initial request plus two retries) can absorb brief
+ * upstream stalls while still fitting inside the watcher's 15-second source budget.
  */
 export function makeResilientSourceFetch(fetchImpl = fetch) {
   return async function resilientSourceFetch(input, init = {}) {
