@@ -2,29 +2,43 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { makeResilientSourceFetch } from "../src/resilient-fetch.js";
 
-test("source GET retries one transient timeout", async () => {
+test("source GET survives two transient timeouts before succeeding", async () => {
   let calls = 0;
   const fetchImpl = async () => {
     calls++;
-    if (calls === 1) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    if (calls < 3) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
     return new Response("ok", { status: 200 });
   };
   const resilient = makeResilientSourceFetch(fetchImpl);
   const response = await resilient("https://opencode.ai/go", { method: "GET" });
   assert.equal(response.status, 200);
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
 });
 
-test("source GET retries a transient 5xx response", async () => {
+test("source GET survives two transient 5xx responses before succeeding", async () => {
   let calls = 0;
   const fetchImpl = async () => {
     calls++;
-    return calls === 1 ? new Response("temporary", { status: 503 }) : new Response("ok", { status: 200 });
+    return calls < 3 ? new Response("temporary", { status: 503 }) : new Response("ok", { status: 200 });
   };
   const resilient = makeResilientSourceFetch(fetchImpl);
   const response = await resilient("https://opencode.ai/docs/go/", { method: "GET" });
   assert.equal(response.status, 200);
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
+});
+
+test("source GET surfaces a timeout only after all three attempts fail", async () => {
+  let calls = 0;
+  const resilient = makeResilientSourceFetch(async () => {
+    calls++;
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  });
+
+  await assert.rejects(
+    resilient("https://opencode.ai/go", { method: "GET" }),
+    /timed out after 3 attempts × 4s/,
+  );
+  assert.equal(calls, 3);
 });
 
 test("caller abort cancels an in-flight GET without retrying", async () => {
