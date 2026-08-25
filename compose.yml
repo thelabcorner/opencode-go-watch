@@ -16,29 +16,43 @@ services:
       - watch-kv:/app/.wrangler/state   # KV (STATE binding) persistence
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
-      interval: 30s
+      interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 12
+      start_period: 3s
     labels:
       - traefik.enable=true
       - traefik.http.routers.watch.rule=Host(`watch.lab.example.com`)
       - traefik.http.routers.watch.entrypoints=web
       - traefik.http.services.watch.loadbalancer.server.port=8787
 
+  # wrangler dev does not fire the Worker's scheduled() handler by itself.
+  # This sidecar is therefore the homelab scheduler and MUST invoke every
+  # independently persisted watcher namespace, not only the Go watcher.
   cron:
     image: curlimages/curl:latest
     container_name: opencode-go-watch-cron
     restart: unless-stopped
     networks: [homelab-net]
-    depends_on: [app]
+    depends_on:
+      app:
+        condition: service_healthy
     environment:
       - ADMIN_TOKEN=${ADMIN_TOKEN}
     entrypoint: >
-      sh -c 'while true; do
-        curl -s -o /dev/null -X POST -H "Authorization: Bearer $ADMIN_TOKEN" http://app:8787/check;
-        echo "$(date -u) fired /check";
-        sleep 60;
-      done'
+      sh -c '
+        while true; do
+          for path in check zen/check; do
+            if curl -fsS --max-time 45 -o /dev/null -X POST -H "Authorization: Bearer $$ADMIN_TOKEN" "http://app:8787/$$path"; then
+              echo "$$(date -u) fired /$$path";
+            else
+              code=$$?;
+              echo "$$(date -u) FAILED /$$path (curl exit $$code)" >&2;
+            fi;
+          done;
+          sleep 60;
+        done
+      '
     labels: { traefik.enable: "false" }
 
 volumes:
