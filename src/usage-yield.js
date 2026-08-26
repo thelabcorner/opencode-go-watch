@@ -134,6 +134,7 @@ export function buildGoUsageYieldRanking(snapshot) {
     if (!allowed.has(key)) allowed.set(key, name);
   }
 
+  /** @type {any[]} */
   const entries = core.entries.filter((entry) => allowed.has(canonicalModelKey(entry.name)));
   const existing = new Set(entries.map((entry) => canonicalModelKey(entry.name)));
 
