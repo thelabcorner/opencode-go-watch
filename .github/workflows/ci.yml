@@ -1,19 +1,55 @@
 name: CI
 
-# SECURITY: push-only, main-only. No pull_request trigger —
-# fork PRs would execute attacker-controlled code on the homelab runner.
+# Same-repository PR validation is allowed on the homelab runner, but fork PRs are
+# explicitly rejected before any attacker-controlled checkout can execute. Secrets
+# and deployment remain push-to-main only.
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
+  validate-pr:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'thelabcorner'
+    runs-on: [self-hosted, homelab]
+    timeout-minutes: 15
+    env:
+      npm_config_cache: /_work/.npm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps (lockfile, offline-first)
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefer-offline
+
+      - name: Validate (check + typecheck + test)
+        run: npm run validate
+
+      - name: Cloudflare bundle dry run
+        run: npm run cf:dry-run
+
+      - name: Live OpenCode Usage Yield smoke
+        run: node scripts/live-usage-yield-smoke.mjs
+
   validate-and-deploy:
-    # belt-and-suspenders guard against renamed/reused runners
-    if: github.repository == 'thelabcorner/opencode-go-watch'
+    if: github.event_name == 'push' && github.repository == 'thelabcorner/opencode-go-watch'
     runs-on: [self-hosted, homelab]
     timeout-minutes: 15
     env:
