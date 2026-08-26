@@ -3,6 +3,12 @@ import assert from "node:assert/strict";
 import worker from "../src/entry.js";
 import { usageValuePresentationScore, usageValueRankScript } from "../src/usage-value-rank.js";
 
+function emptyState() {
+  return {
+    async get() { return null; },
+  };
+}
+
 test("dashboard presentation ordering follows the V2 semantic hierarchy", () => {
   const quota = usageValuePresentationScore({ quotaExempt: true });
   const free = usageValuePresentationScore({ free: true });
@@ -31,4 +37,14 @@ test("production entry serves the rank enhancer as a cacheable same-origin scrip
   assert.match(response.headers.get("content-type") ?? "", /application\/javascript/);
   assert.equal(response.headers.get("cache-control"), "public, max-age=300");
   assert.match(await response.text(), /Usage value V2 rank/);
+});
+
+test("production Go and Zen dashboards both load the V2 rank-order enhancer", async () => {
+  for (const path of ["/", "/zen"]) {
+    const response = await worker.fetch(new Request(`https://worker.example${path}`), { STATE: emptyState() });
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    assert.match(html, /<script src="\/usage-value-rank\.js" defer><\/script>/);
+    assert.equal((html.match(/usage-value-rank\.js/g) ?? []).length, 1);
+  }
 });
