@@ -48,11 +48,11 @@ function envWithSnapshot() {
   return { STATE };
 }
 
-test("production entry renders exactly one Usage Value V2 section", async () => {
+test("production entry renders exactly one Usage Yield V2 section", async () => {
   const response = await worker.fetch(new Request("https://worker.example/"), envWithSnapshot());
   assert.equal(response.status, 200);
   const body = await response.text();
-  assert.match(body, /Usage Value V2/);
+  assert.match(body, /Usage Yield V2/);
   assert.equal((body.match(/id="usage-value"/g) ?? []).length, 1);
   assert.equal((body.match(/href="#usage-value"/g) ?? []).length, 1);
 });
