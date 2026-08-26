@@ -1,5 +1,5 @@
 import { canonicalModelKey, deriveConsistency } from "./parsers.js";
-import { basePricingName, buildGoCheapnessRanking, cheapnessFor } from "./cost-ranking.js";
+import { basePricingName, buildGoUsageYieldRanking, usageYieldFor } from "./usage-yield.js";
 
 const MAX_MESSAGE = 3850;
 const CHAT_ID_KEY = "telegram:chat_id:v1";
@@ -47,6 +47,10 @@ function fmtCost(value) {
   if (Math.abs(value) < 0.00000001) return `$${value.toExponential(2)}`;
   return `$${COST_FORMATTER.format(value)}`;
 }
+function fmtYield(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return NUMBER_FORMATTER.format(value);
+}
 function fmtPercent(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
   const sign = value > 0 ? "+" : "";
@@ -83,7 +87,7 @@ function requestGrid(row) {
 
 function profileLine(profile) {
   if (!profile) return "";
-  return `🧠 <b>Typical request</b>  in <code>${fmtNumber(profile.inputTokens)}</code> · cached <code>${fmtNumber(profile.cachedTokens)}</code> · out <code>${fmtNumber(profile.outputTokens)}</code>`;
+  return `🧠 <b>Observed request profile</b>  in <code>${fmtNumber(profile.inputTokens)}</code> · cached <code>${fmtNumber(profile.cachedTokens)}</code> · out <code>${fmtNumber(profile.outputTokens)}</code>`;
 }
 function pricingForModel(snapshot, model) {
   const wanted = canonicalModelKey(model);
@@ -103,17 +107,32 @@ function pricingSummary(rows, maxRows = 3) {
   if (rows.length > maxRows) shown.push(`• …and ${rows.length - maxRows} more pricing row${rows.length - maxRows === 1 ? "" : "s"}`);
   return `💰 <b>Pricing / 1M tokens</b>\n${shown.join("\n")}`;
 }
-function rankLabel(entry) {
+function paidRankLabel(entry) {
   const tie = entry.tieCount > 1 ? ` · ${entry.tieCount}-way tie` : "";
-  return `#${entry.rank} of ${entry.total} ranked${tie}`;
+  return `#${entry.rank} of ${entry.total} paid${tie}`;
 }
-function goCheapnessLine(ranking, model) {
-  const entry = cheapnessFor(ranking, model);
-  if (!entry) return `💸 <b>Cheapness</b>  <i>pending pricing/profile</i>`;
-  if (entry.free) return `💸 <b>Cheapness</b>  <code>${rankLabel(entry)}</code> · <b>$0 published Go cost</b>`;
-  const range = entry.maxCost > entry.minCost ? `${fmtCost(entry.minCost)}–${fmtCost(entry.maxCost)}` : fmtCost(entry.minCost);
-  const tierNote = entry.variantCount > 1 ? `\n<i>Rank uses the cheapest published tier; ${entry.variantCount} pricing variants span ${range}.</i>` : "";
-  return `💸 <b>Cheapness</b>  <code>${rankLabel(entry)}</code> · ~<b>${fmtCost(entry.minCost)}</b> / typical request${tierNote}`;
+function calibrationLine(ranking) {
+  const count = ranking?.calibration?.stats?.uniqueWorkloads;
+  return count ? `<i>V2 normalizes every paid model against the same ${count}-shape OpenCode agent workload corpus.</i>` : "";
+}
+function goUsageValueLine(ranking, model) {
+  const entry = usageYieldFor(ranking, model);
+  if (!entry || entry.class === "unranked") return `💸 <b>Usage value</b>  <i>pending standardized pricing/workload evidence</i>`;
+  if (entry.class === "quota-exempt") return `💸 <b>Usage value</b>  <b>FREE · Go quota-exempt</b>\n<i>∞ is the Go allowance state; it does not prove an independent free-model gateway has no rate limit.</i>`;
+  const monthly = entry.goCapacity?.monthlyEquivalentRequests;
+  const best = typeof entry.fractionOfBest === "number" ? `${(entry.fractionOfBest * 100).toFixed(0)}% of best` : "";
+  const core = [
+    `💸 <b>Usage value</b>  <code>${paidRankLabel(entry)}</code>`,
+    `~<b>${fmtYield(monthly)}</b> standardized requests / Go monthly allowance`,
+    `~<b>${fmtYield(entry.requestsPerDollar)}</b> equivalent req/$ · ${best} · ${fmtCost(entry.costPerEquivalentRequest)} / standardized request`,
+  ];
+  if (entry.regimes?.time) {
+    core.push(`<i>Off-peak ~${fmtYield(entry.regimes.time.offPeakRequestsPerDollar)} req/$ · Peak ~${fmtYield(entry.regimes.time.peakRequestsPerDollar)} req/$ · peak usage ${fmtPercent(entry.regimes.time.peakUsagePenaltyPercent)}</i>`);
+  } else if (entry.variantCount > 1) {
+    core.push(`<i>${entry.variantCount} pricing variants are applied by workload/context semantics; rank is not based on the cheapest row.</i>`);
+  }
+  if (entry.confidence !== "high") core.push(`<i>Evidence confidence: ${escapeHtml(entry.confidence)}</i>`);
+  return core.filter(Boolean).join("\n");
 }
 function related(change, model) {
   const wanted = canonicalModelKey(model);
@@ -129,7 +148,8 @@ function renderModelAdded(change, snapshot, ranking) {
   const parts = [
     unlimited ? `♾️ <b>UNLIMITED GO MODEL ADDED</b>` : `🆕 <b>MODEL ADDED</b>`,
     `<b>${escapeHtml(model)}</b>`,
-    goCheapnessLine(ranking, model),
+    goUsageValueLine(ranking, model),
+    calibrationLine(ranking),
     requestGrid(change.after),
   ];
   if (chart) parts.push(`📈 <b>Go chart</b>  <code>${chart.unlimited ? "∞" : fmtNumber(chart.requests5h)}</code> / 5h${chart.bonus ? `  ·  🎁 ${escapeHtml(chart.bonus)}` : ""}`);
@@ -156,18 +176,18 @@ function renderRequestChanges(model, changes, ranking) {
     return `${labelField(change.field).padEnd(8)} <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code>  ${direction(change.before, change.after)}${pct ? ` ${pct}` : ""}`;
   });
   const modeChange = changes.some((change) => change.field === "unlimited");
-  return `${modeChange ? "♾️ <b>GO ALLOWANCE MODE CHANGED</b>" : "📊 <b>REQUEST LIMIT CHANGED</b>"}\n<b>${escapeHtml(model)}</b>\n${goCheapnessLine(ranking, model)}\n${lines.join("\n")}`;
+  return `${modeChange ? "♾️ <b>GO ALLOWANCE MODE CHANGED</b>" : "📊 <b>REQUEST LIMIT CHANGED</b>"}\n<b>${escapeHtml(model)}</b>\n${goUsageValueLine(ranking, model)}\n${lines.join("\n")}`;
 }
 function renderPricingChanges(rowName, changes, ranking) {
   const lines = changes.map((change) => {
     const pct = fmtPercent(change.percent);
     return `${labelField(change.field)}: <code>${fmtMoney(change.before)} → ${fmtMoney(change.after)}</code> ${direction(change.before, change.after)}${pct ? ` ${pct}` : ""}`;
   });
-  return `💰 <b>PRICING CHANGED</b>\n<b>${escapeHtml(rowName)}</b>\n${goCheapnessLine(ranking, basePricingName(rowName))}\n${lines.join("\n")}`;
+  return `💰 <b>PRICING CHANGED</b>\n<b>${escapeHtml(rowName)}</b>\n${goUsageValueLine(ranking, basePricingName(rowName))}\n${lines.join("\n")}`;
 }
 function renderProfileChanges(model, changes, ranking) {
   const lines = changes.map((change) => `${labelField(change.field)}: <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code> ${direction(change.before, change.after)} ${fmtPercent(change.percent)}`.trim());
-  return `🧠 <b>REQUEST PROFILE CHANGED</b>\n<b>${escapeHtml(model)}</b>\n${goCheapnessLine(ranking, model)}\n${lines.join("\n")}`;
+  return `🧠 <b>REQUEST PROFILE CHANGED</b>\n<b>${escapeHtml(model)}</b>\n${goUsageValueLine(ranking, model)}\n${lines.join("\n")}\n📐 <i>The shared V2 workload corpus was recalculated; all paid Usage Value ranks are recomputed from the new corpus.</i>`;
 }
 function modelId(value) {
   const id = String(value ?? "").trim();
@@ -184,7 +204,7 @@ function renderChartChanges(model, changes, ranking) {
     return `5 hour: <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code> ${direction(change.before, change.after)} ${fmtPercent(change.percent)}`.trim();
   });
   const title = onlyModelId ? "🪪 <b>GO MODEL ID CHANGED</b>" : hasUnlimited ? "♾️ <b>GO ALLOWANCE MODE CHANGED</b>" : "📈 <b>GO CHART CHANGED</b>";
-  return `${title}\n<b>${escapeHtml(model)}</b>${hasUnlimited ? `\n${goCheapnessLine(ranking, model)}` : ""}\n${lines.join("\n")}`;
+  return `${title}\n<b>${escapeHtml(model)}</b>${hasUnlimited ? `\n${goUsageValueLine(ranking, model)}` : ""}\n${lines.join("\n")}`;
 }
 function groupByKey(changes, type) {
   const groups = new Map();
@@ -195,7 +215,7 @@ function groupByKey(changes, type) {
 function renderBlocks(changes, snapshot) {
   const consumed = new Set();
   const blocks = [];
-  const ranking = buildGoCheapnessRanking(snapshot);
+  const ranking = buildGoUsageYieldRanking(snapshot);
   changes.forEach((change, index) => {
     if (change.type !== "model_added" && change.type !== "model_removed") return;
     consumed.add(index);
@@ -221,17 +241,17 @@ function renderBlocks(changes, snapshot) {
   }
 
   const global = changes.map((change, index) => ({ ...change, __index: index })).filter((item) => item.type === "global_limit_changed" && !consumed.has(item.__index));
-  if (global.length) { global.forEach((item) => consumed.add(item.__index)); blocks.push(`💳 <b>SUBSCRIPTION ALLOWANCE CHANGED</b>\n${global.map((item) => `${labelField(item.field)}: <code>${fmtMoney(item.before)} → ${fmtMoney(item.after)}</code> ${direction(item.before, item.after)} ${fmtPercent(item.percent)}`.trim()).join("\n")}`); }
+  if (global.length) { global.forEach((item) => consumed.add(item.__index)); blocks.push(`💳 <b>SUBSCRIPTION ALLOWANCE CHANGED</b>\n${global.map((item) => `${labelField(item.field)}: <code>${fmtMoney(item.before)} → ${fmtMoney(item.after)}</code> ${direction(item.before, item.after)} ${fmtPercent(item.percent)}`.trim()).join("\n")}\n<i>Window-specific V2 capacity is recalculated from the new Go dollar allowance.</i>`); }
 
   changes.forEach((change, index) => {
     if (consumed.has(index)) return;
     consumed.add(index);
     switch (change.type) {
-      case "request_profile_added": blocks.push(`🧠 <b>REQUEST PROFILE ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${goCheapnessLine(ranking, change.key)}\n${profileLine(change.after)}`); break;
-      case "request_profile_removed": blocks.push(`🧠 <b>REQUEST PROFILE REMOVED</b>\n<b>${escapeHtml(change.key)}</b>\n${goCheapnessLine(ranking, change.key)}`); break;
-      case "pricing_row_added": blocks.push(`💰 <b>PRICING ROW ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${goCheapnessLine(ranking, basePricingName(change.key))}\n${pricingSummary([[change.key, change.after]], 1)}`); break;
-      case "pricing_row_removed": blocks.push(`🧹 <b>PRICING ROW REMOVED</b>\n<b>${escapeHtml(change.key)}</b>\n${goCheapnessLine(ranking, basePricingName(change.key))}`); break;
-      case "chart_model_added": blocks.push(`${change.after?.unlimited ? "♾️ <b>UNLIMITED GO CHART MODEL ADDED</b>" : "🟢 <b>GO CHART MODEL ADDED</b>"}\n<b>${escapeHtml(change.key)}</b>\n${change.after?.unlimited ? `${goCheapnessLine(ranking, change.key)}\n` : ""}<code>${fmtRequest(change.after)}</code> requests / 5h${change.after?.unlimited ? "\n<i>Go quota-exempt; separate free-model rate limits may still apply.</i>" : ""}${change.after?.bonus ? `\n🎁 ${escapeHtml(change.after.bonus)}` : ""}`); break;
+      case "request_profile_added": blocks.push(`🧠 <b>REQUEST PROFILE ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${goUsageValueLine(ranking, change.key)}\n${profileLine(change.after)}\n📐 <i>Shared V2 workload corpus recalibrated.</i>`); break;
+      case "request_profile_removed": blocks.push(`🧠 <b>REQUEST PROFILE REMOVED</b>\n<b>${escapeHtml(change.key)}</b>\n${goUsageValueLine(ranking, change.key)}\n📐 <i>Shared V2 workload corpus recalibrated.</i>`); break;
+      case "pricing_row_added": blocks.push(`💰 <b>PRICING ROW ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${goUsageValueLine(ranking, basePricingName(change.key))}\n${pricingSummary([[change.key, change.after]], 1)}`); break;
+      case "pricing_row_removed": blocks.push(`🧹 <b>PRICING ROW REMOVED</b>\n<b>${escapeHtml(change.key)}</b>\n${goUsageValueLine(ranking, basePricingName(change.key))}`); break;
+      case "chart_model_added": blocks.push(`${change.after?.unlimited ? "♾️ <b>UNLIMITED GO CHART MODEL ADDED</b>" : "🟢 <b>GO CHART MODEL ADDED</b>"}\n<b>${escapeHtml(change.key)}</b>\n${change.after?.unlimited ? `${goUsageValueLine(ranking, change.key)}\n` : ""}<code>${fmtRequest(change.after)}</code> requests / 5h${change.after?.unlimited ? "\n<i>Go quota-exempt; separate free-model rate limits may still apply.</i>" : ""}${change.after?.bonus ? `\n🎁 ${escapeHtml(change.after.bonus)}` : ""}`); break;
       case "chart_model_removed": blocks.push(`${change.before?.unlimited ? "♾️ <b>UNLIMITED GO CHART MODEL REMOVED</b>" : "🔴 <b>GO CHART MODEL REMOVED</b>"}\n<b>${escapeHtml(change.key)}</b>\nwas <code>${fmtRequest(change.before)}</code> requests / 5h`); break;
       case "promo_banner_changed": blocks.push(`🎁 <b>PROMOTION BANNER CHANGED</b>\n<code>${escapeHtml(change.before ?? "none")}</code>\n↓\n<code>${escapeHtml(change.after ?? "none")}</code>`); break;
       case "consistency_mismatch": blocks.push(`⚠️ <b>CHART / DOCS MISMATCH</b>\n<b>${escapeHtml(change.key)}</b>\nchart <code>${change.after?.chartUnlimited ? "∞" : fmtNumber(change.after?.chart)}</code> · docs <code>${change.after?.docsUnlimited ? "∞" : fmtNumber(change.after?.docs)}</code>`); break;
@@ -285,10 +305,14 @@ export function buildBootMessage(snapshot, timeZone = "America/Chicago") {
   const consistency = deriveConsistency(snapshot.go, snapshot.docs);
   const mismatches = Object.values(consistency).filter((item) => item.status === "mismatch").length;
   const promos = Object.entries(consistency).filter(([, item]) => item.status === "promotion");
+  const ranking = buildGoUsageYieldRanking(snapshot);
+  const best = ranking.paidEntries[0];
   return [
     "🟢 <b>OPENCODE GO WATCH · ARMED</b>", "━━━━━━━━━━━━━━━━━━━━", "Baseline captured. Semantic monitoring is live.", "",
     `📚 <b>${modelCount}</b> usage-table models  ·  📈 <b>${chartCount}</b> chart models`,
     `<pre>5 hour  ${fmtMoney(limits.fiveHourUsd)}\nweek    ${fmtMoney(limits.weeklyUsd)}\nmonth   ${fmtMoney(limits.monthlyUsd)}</pre>`,
+    best ? `💸 <b>Best paid Usage Value</b>  ${escapeHtml(best.name)} · ~${fmtYield(best.goCapacity?.monthlyEquivalentRequests)} standardized requests / monthly Go allowance` : "",
+    ranking.calibration?.stats?.uniqueWorkloads ? `📐 V2 calibration: <b>${ranking.calibration.stats.uniqueWorkloads}</b> unique OpenCode request shapes` : "",
     unlimited.length ? `♾️ <b>${unlimited.length}</b> Go quota-exempt model${unlimited.length === 1 ? "" : "s"}: ${unlimited.map(([name]) => escapeHtml(name)).join(" · ")}` : "",
     unlimited.length ? `<i>∞ reflects the Go allowance surface; separate free-model rate limits may still apply.</i>` : "",
     promos.length ? `🎁 ${promos.map(([name, item]) => `${escapeHtml(name)} ${item.multiplier}x`).join(" · ")}` : "",

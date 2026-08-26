@@ -4,6 +4,7 @@ import { resilientSourceFetch } from "./resilient-fetch.js";
 import { shouldRecordFailure } from "./resource-budget.js";
 import { dashboard, dashboardScript } from "./dashboard.js";
 import { zenDashboard, zenDashboardScript } from "./zen-dashboard.js";
+import { goUsageValueSection, zenUsageValueSection } from "./usage-value-dashboard.js";
 import { getZenStatus, readZenSnapshot, recordZenFailure, resetZenBaseline, runZenWatch } from "./zen.js";
 import { buildZenBootMessage, buildZenChangeMessages, buildZenErrorMessage, buildZenRecoveryMessage, sendZenTelegram } from "./zen-telegram.js";
 import {
@@ -48,30 +49,33 @@ async function previousError(env) {
   return env.STATE ? env.STATE.get(ERROR_KEY, { type: "json" }) : null;
 }
 
-function decorateGoDashboard(html) {
+function decorateGoDashboard(html, snapshot) {
+  const usageValue = goUsageValueSection(snapshot);
   return html
     .replaceAll(`${UNKNOWN_PROVIDER_LOGO}<span>Qwen`, `${ALIBABA_PROVIDER_LOGO}<span>Qwen`)
     .replaceAll(`${UNKNOWN_PROVIDER_LOGO}<div><strong>Qwen`, `${ALIBABA_PROVIDER_LOGO}<div><strong>Qwen`)
-    .replace('<a href="#models">Models</a>', '<a href="#models">Models</a><a href="/zen">Zen</a>');
+    .replace('<a href="#models">Models</a>', '<a href="#usage-value">Value</a><a href="#models">Models</a><a href="/zen">Zen</a>')
+    .replace("</main>", `${usageValue}</main>`);
+}
+
+function decorateZenDashboard(html, snapshot, goCalibration) {
+  const usageValue = zenUsageValueSection(snapshot, goCalibration);
+  return html
+    .replace('<a href="#models">Models</a>', '<a href="#usage-value">Value</a><a href="#models">Models</a>')
+    .replace("</main>", `${usageValue}</main>`);
 }
 
 async function safeArchive(env, event) {
   if (!event) return;
-  try {
-    await appendAlertEvent(env, event);
-  } catch (error) {
-    console.error("alert history archive failed", error);
-  }
+  try { await appendAlertEvent(env, event); }
+  catch (error) { console.error("alert history archive failed", error); }
 }
 
 async function safeArchiveMany(env, events) {
   const filtered = events.filter(Boolean);
   if (!filtered.length) return;
-  try {
-    await appendAlertEvents(env, filtered);
-  } catch (error) {
-    console.error("alert history batch archive failed", error);
-  }
+  try { await appendAlertEvents(env, filtered); }
+  catch (error) { console.error("alert history batch archive failed", error); }
 }
 
 async function archiveSuccessfulRun(env, result, priorError, now, forceNotify = false) {
@@ -127,7 +131,6 @@ function zenHistoryFailure(error, now) {
   const message = String(error?.message ?? error);
   return { at: now.toISOString(), kind: "zen-error", severity: "error", title: "🔴 OPENCODE ZEN WATCH · ERROR", detail: message, message };
 }
-
 function zenHistoryRecovery(error, now) {
   const message = String(error?.message ?? "unknown error");
   return { at: now.toISOString(), kind: "zen-recovery", severity: "success", title: "✅ OPENCODE ZEN WATCH · RECOVERED", detail: `Recovered after: ${message}`, message };
@@ -137,7 +140,8 @@ function zenCallbacks(env) {
   const timeZone = env.TIMEZONE || "America/Chicago";
   return {
     notifyChanges: async (changes, snapshot) => {
-      for (const message of buildZenChangeMessages(changes, snapshot, timeZone)) await sendZenTelegram(env, message);
+      const goCalibration = await readSnapshot(env);
+      for (const message of buildZenChangeMessages(changes, snapshot, timeZone, goCalibration)) await sendZenTelegram(env, message);
     },
     notifyBootstrap: async (snapshot) => {
       const enabled = String(env.NOTIFY_ON_ZEN_BOOTSTRAP ?? "true").toLowerCase() !== "false";
@@ -148,10 +152,8 @@ function zenCallbacks(env) {
 }
 
 async function manualCheck(request, env, forceNotify = false) {
-  const guard = adminGuard(request, env);
-  if (guard) return guard;
-  const now = new Date();
-  const priorError = await previousError(env);
+  const guard = adminGuard(request, env); if (guard) return guard;
+  const now = new Date(); const priorError = await previousError(env);
   try {
     const result = await runWatch(env, { forceNotify, fetchImpl: resilientSourceFetch, now });
     await archiveSuccessfulRun(env, result, priorError, now, forceNotify);
@@ -164,10 +166,8 @@ async function manualCheck(request, env, forceNotify = false) {
 }
 
 async function manualZenCheck(request, env) {
-  const guard = adminGuard(request, env);
-  if (guard) return guard;
-  const now = new Date();
-  const priorError = (await getZenStatus(env)).error;
+  const guard = adminGuard(request, env); if (guard) return guard;
+  const now = new Date(); const priorError = (await getZenStatus(env)).error;
   try {
     const result = await runZenWatch(env, { fetchImpl: resilientSourceFetch, now, ...zenCallbacks(env) });
     const notifyBootstrap = String(env.NOTIFY_ON_ZEN_BOOTSTRAP ?? "true").toLowerCase() !== "false";
@@ -175,10 +175,7 @@ async function manualZenCheck(request, env) {
     if (priorError) await safeArchive(env, zenHistoryRecovery(priorError, now));
     return json({ status: result.status, changes: result.changes, optimization: result.optimization });
   } catch (error) {
-    const failure = await recordZenFailure(env, error, {
-      now,
-      notify: async (failureError, at) => sendZenTelegram(env, buildZenErrorMessage(failureError, at.toISOString(), env.TIMEZONE || "America/Chicago")),
-    });
+    const failure = await recordZenFailure(env, error, { now, notify: async (failureError, at) => sendZenTelegram(env, buildZenErrorMessage(failureError, at.toISOString(), env.TIMEZONE || "America/Chicago")) });
     if (failure.notified) await safeArchive(env, zenHistoryFailure(error, now));
     return json(failure, 502);
   }
@@ -187,114 +184,49 @@ async function manualZenCheck(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
-    if (request.method === "GET" && url.pathname === "/dashboard.js") {
-      return new Response(dashboardScript, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=300", ...SECURITY_HEADERS } });
-    }
-
-    if (request.method === "GET" && url.pathname === "/zen-dashboard.js") {
-      return new Response(zenDashboardScript, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=300", ...SECURITY_HEADERS } });
-    }
-
+    if (request.method === "GET" && url.pathname === "/dashboard.js") return new Response(dashboardScript, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=300", ...SECURITY_HEADERS } });
+    if (request.method === "GET" && url.pathname === "/zen-dashboard.js") return new Response(zenDashboardScript, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=300", ...SECURITY_HEADERS } });
     if (request.method === "GET" && url.pathname === "/") {
       const [status, history] = await Promise.all([getStatus(env), readAlertHistory(env, 24)]);
-      return new Response(decorateGoDashboard(dashboard(status, history)), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
+      return new Response(decorateGoDashboard(dashboard(status, history), status.snapshot), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
     }
-
     if (request.method === "GET" && (url.pathname === "/zen" || url.pathname === "/zen/")) {
-      const [status, history] = await Promise.all([getZenStatus(env), readAlertHistory(env, 96)]);
-      return new Response(zenDashboard(status, history), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
+      const [status, history, goCalibration] = await Promise.all([getZenStatus(env), readAlertHistory(env, 96), readSnapshot(env)]);
+      return new Response(decorateZenDashboard(zenDashboard(status, history), status.snapshot, goCalibration), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
     }
-
     if (request.method === "GET" && url.pathname === "/health") {
-      const status = await getStatus(env);
-      return json({ ok: status.ok, configured: status.configured, meta: status.meta, error: status.error }, status.ok ? 200 : 503);
+      const status = await getStatus(env); return json({ ok: status.ok, configured: status.configured, meta: status.meta, error: status.error }, status.ok ? 200 : 503);
     }
-
     if (request.method === "GET" && url.pathname === "/zen/health") {
-      const status = await getZenStatus(env);
-      return json({ ok: status.ok, meta: status.meta, error: status.error, modelCount: Object.keys(status.snapshot?.models ?? {}).length, freeCount: Object.values(status.snapshot?.models ?? {}).filter((model) => model.free).length }, status.ok ? 200 : 503);
+      const status = await getZenStatus(env); return json({ ok: status.ok, meta: status.meta, error: status.error, modelCount: Object.keys(status.snapshot?.models ?? {}).length, freeCount: Object.values(status.snapshot?.models ?? {}).filter((model) => model.free).length }, status.ok ? 200 : 503);
     }
-
-    if (request.method === "GET" && url.pathname === "/status") {
-      const guard = adminGuard(request, env);
-      if (guard) return guard;
-      return json(await getStatus(env));
-    }
-
-    if (request.method === "GET" && url.pathname === "/zen/status") {
-      const guard = adminGuard(request, env);
-      if (guard) return guard;
-      return json(await getZenStatus(env));
-    }
-
-    if (request.method === "GET" && url.pathname === "/snapshot") {
-      const guard = adminGuard(request, env);
-      if (guard) return guard;
-      const snapshot = await readSnapshot(env);
-      return snapshot ? json(snapshot) : json({ error: "no baseline yet" }, 404);
-    }
-
-    if (request.method === "GET" && url.pathname === "/zen/snapshot") {
-      const guard = adminGuard(request, env);
-      if (guard) return guard;
-      const snapshot = await readZenSnapshot(env);
-      return snapshot ? json(snapshot) : json({ error: "no Zen baseline yet" }, 404);
-    }
-
+    if (request.method === "GET" && url.pathname === "/status") { const guard = adminGuard(request, env); if (guard) return guard; return json(await getStatus(env)); }
+    if (request.method === "GET" && url.pathname === "/zen/status") { const guard = adminGuard(request, env); if (guard) return guard; return json(await getZenStatus(env)); }
+    if (request.method === "GET" && url.pathname === "/snapshot") { const guard = adminGuard(request, env); if (guard) return guard; const snapshot = await readSnapshot(env); return snapshot ? json(snapshot) : json({ error: "no baseline yet" }, 404); }
+    if (request.method === "GET" && url.pathname === "/zen/snapshot") { const guard = adminGuard(request, env); if (guard) return guard; const snapshot = await readZenSnapshot(env); return snapshot ? json(snapshot) : json({ error: "no Zen baseline yet" }, 404); }
     if (request.method === "POST" && url.pathname === "/check") return manualCheck(request, env, false);
     if (request.method === "POST" && url.pathname === "/check/notify") return manualCheck(request, env, true);
     if (request.method === "POST" && url.pathname === "/zen/check") return manualZenCheck(request, env);
-
-    if (request.method === "POST" && url.pathname === "/baseline/reset") {
-      const guard = adminGuard(request, env);
-      if (guard) return guard;
-      await resetBaseline(env);
-      return json({ ok: true, message: "Baseline cleared; next successful check will bootstrap a new baseline." });
-    }
-
-    if (request.method === "POST" && url.pathname === "/zen/baseline/reset") {
-      const guard = adminGuard(request, env);
-      if (guard) return guard;
-      await resetZenBaseline(env);
-      return json({ ok: true, message: "Zen baseline cleared; next successful Zen check will bootstrap a new baseline." });
-    }
-
+    if (request.method === "POST" && url.pathname === "/baseline/reset") { const guard = adminGuard(request, env); if (guard) return guard; await resetBaseline(env); return json({ ok: true, message: "Baseline cleared; next successful check will bootstrap a new baseline." }); }
+    if (request.method === "POST" && url.pathname === "/zen/baseline/reset") { const guard = adminGuard(request, env); if (guard) return guard; await resetZenBaseline(env); return json({ ok: true, message: "Zen baseline cleared; next successful Zen check will bootstrap a new baseline." }); }
     if (request.method === "POST" && url.pathname === "/telegram/setup") {
-      const guard = adminGuard(request, env);
-      if (guard) return guard;
+      const guard = adminGuard(request, env); if (guard) return guard;
       try {
-        const setup = await setupTelegram(env);
-        const status = await getStatus(env);
-        if (status.error) {
-          const at = new Date(status.error.lastSeenAt || new Date().toISOString());
-          await sendTelegram(env, buildErrorMessage(new Error(status.error.message), at.toISOString(), env.TIMEZONE || "America/Chicago"));
-          await safeArchive(env, historyEventForFailure(new Error(status.error.message), at));
-        }
+        const setup = await setupTelegram(env); const status = await getStatus(env);
+        if (status.error) { const at = new Date(status.error.lastSeenAt || new Date().toISOString()); await sendTelegram(env, buildErrorMessage(new Error(status.error.message), at.toISOString(), env.TIMEZONE || "America/Chicago")); await safeArchive(env, historyEventForFailure(new Error(status.error.message), at)); }
         return json({ ...setup, degraded: Boolean(status.error) });
-      } catch (error) {
-        return json({ ok: false, error: String(error?.message ?? error) }, 400);
-      }
+      } catch (error) { return json({ ok: false, error: String(error?.message ?? error) }, 400); }
     }
-
     if (request.method === "POST" && url.pathname === "/telegram/test") {
-      const guard = adminGuard(request, env);
-      if (guard) return guard;
-      try {
-        await sendTelegram(env, "🧪 <b>OPENCODE GO WATCH · TEST</b>\n━━━━━━━━━━━━━━━━━━━━\nTelegram delivery is working.\n\n✅ HTML cards\n✅ Inline navigation\n✅ Worker → Telegram");
-        return json({ ok: true });
-      } catch (error) {
-        return json({ ok: false, error: String(error?.message ?? error) }, 502);
-      }
+      const guard = adminGuard(request, env); if (guard) return guard;
+      try { await sendTelegram(env, "🧪 <b>OPENCODE GO WATCH · TEST</b>\n━━━━━━━━━━━━━━━━━━━━\nTelegram delivery is working.\n\n✅ HTML cards\n✅ Inline navigation\n✅ Worker → Telegram"); return json({ ok: true }); }
+      catch (error) { return json({ ok: false, error: String(error?.message ?? error) }, 502); }
     }
-
     return json({ error: "not found" }, 404);
   },
 
   async scheduled(controller, env, ctx) {
-    const now = new Date(controller.scheduledTime);
-    const historyEvents = [];
-
+    const now = new Date(controller.scheduledTime); const historyEvents = [];
     const goTask = (async () => {
       const priorError = await previousError(env);
       try {
@@ -305,15 +237,10 @@ export default {
         console.log(JSON.stringify({ event: "watch.complete", surface: "go", status: result.status, changes: result.changes.length, optimization: result.optimization }));
       } catch (error) {
         console.error("Go watch failed", error);
-        if (!shouldRecordFailure(priorError, error, now)) {
-          console.warn(JSON.stringify({ event: "watch.failure_suppressed", surface: "go", reason: "kv_write_budget" }));
-          return;
-        }
-        const failure = await recordFailure(env, error, { fetchImpl: resilientSourceFetch, now });
-        if (failure.notified) historyEvents.push(historyEventForFailure(error, now));
+        if (!shouldRecordFailure(priorError, error, now)) { console.warn(JSON.stringify({ event: "watch.failure_suppressed", surface: "go", reason: "kv_write_budget" })); return; }
+        const failure = await recordFailure(env, error, { fetchImpl: resilientSourceFetch, now }); if (failure.notified) historyEvents.push(historyEventForFailure(error, now));
       }
     })();
-
     const zenTask = (async () => {
       const priorError = (await getZenStatus(env)).error;
       try {
@@ -324,18 +251,11 @@ export default {
         console.log(JSON.stringify({ event: "watch.complete", surface: "zen", status: result.status, changes: result.changes.length, optimization: result.optimization }));
       } catch (error) {
         console.error("Zen watch failed", error);
-        if (!shouldRecordFailure(priorError, error, now)) {
-          console.warn(JSON.stringify({ event: "watch.failure_suppressed", surface: "zen", reason: "kv_write_budget" }));
-          return;
-        }
-        const failure = await recordZenFailure(env, error, {
-          now,
-          notify: async (failureError, at) => sendZenTelegram(env, buildZenErrorMessage(failureError, at.toISOString(), env.TIMEZONE || "America/Chicago")),
-        });
+        if (!shouldRecordFailure(priorError, error, now)) { console.warn(JSON.stringify({ event: "watch.failure_suppressed", surface: "zen", reason: "kv_write_budget" })); return; }
+        const failure = await recordZenFailure(env, error, { now, notify: async (failureError, at) => sendZenTelegram(env, buildZenErrorMessage(failureError, at.toISOString(), env.TIMEZONE || "America/Chicago")) });
         if (failure.notified) historyEvents.push(zenHistoryFailure(error, now));
       }
     })();
-
     ctx.waitUntil(Promise.all([goTask, zenTask]).then(() => safeArchiveMany(env, historyEvents)));
   },
 };

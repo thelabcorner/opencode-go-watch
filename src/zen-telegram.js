@@ -1,8 +1,9 @@
 import { resolveTelegramChatId, watcherDashboardUrl } from "./telegram.js";
-import { basePricingName, buildZenCheapnessRanking, cheapnessFor } from "./cost-ranking.js";
+import { basePricingName, buildZenUsageYieldRanking, usageYieldFor } from "./usage-yield.js";
 
 const MAX_MESSAGE = 3850;
 const NUMBER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
+const COST = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 });
 const TIME = new Map();
 
 function esc(value) {
@@ -11,6 +12,17 @@ function esc(value) {
 
 function money(value) {
   return typeof value === "number" && Number.isFinite(value) ? (value === 0 ? "Free" : `$${NUMBER.format(value)}`) : "—";
+}
+
+function cost(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  if (value === 0) return "$0";
+  if (Math.abs(value) < 0.00000001) return `$${value.toExponential(2)}`;
+  return `$${COST.format(value)}`;
+}
+
+function amount(value) {
+  return typeof value === "number" && Number.isFinite(value) ? NUMBER.format(value) : "—";
 }
 
 function pct(value) {
@@ -44,19 +56,39 @@ function priceLabel(field) {
   return ({ inputPerM: "Input", outputPerM: "Output", cachedReadPerM: "Cached read", cachedWritePerM: "Cached write" })[field] ?? field;
 }
 
-function rankLabel(entry) {
+function paidRankLabel(entry) {
   const tie = entry.tieCount > 1 ? ` · ${entry.tieCount}-way tie` : "";
-  return `#${entry.rank} of ${entry.total} ranked${tie}`;
+  return `#${entry.rank} of ${entry.total} paid${tie}`;
 }
 
-function zenCheapnessLine(ranking, model) {
+function zenUsageValueLine(ranking, model) {
   const name = typeof model === "string" ? model : model?.name ?? model?.id;
-  const entry = cheapnessFor(ranking, name);
-  if (!entry) return `💸 <b>Cheapness</b>  <i>pending published pricing</i>`;
-  if (entry.free) return `💸 <b>Cheapness</b>  <code>${rankLabel(entry)}</code> · <b>Free</b>`;
-  const range = entry.maxCost > entry.minCost ? `${money(entry.minCost)}–${money(entry.maxCost)}` : money(entry.minCost);
-  const tier = entry.variantCount > 1 ? ` · ${entry.variantCount} tiers ${range}` : "";
-  return `💸 <b>Cheapness</b>  <code>${rankLabel(entry)}</code> · price index <b>${money(entry.minCost)}</b>${tier}\n<i>Index = input + output + cached-read rates; rank uses the cheapest published tier.</i>`;
+  const entry = usageYieldFor(ranking, name);
+  if (!entry || entry.class === "unranked") {
+    const reason = ranking?.calibration?.workloads?.length ? "pending complete published pricing" : "waiting for Go workload calibration";
+    return `💸 <b>Usage value</b>  <i>${reason}</i>`;
+  }
+  if (entry.class === "free-limited-unknown") {
+    return `💸 <b>Usage value</b>  <b>FREE</b>\n<i>Public Zen sources do not establish a comparable request-capacity limit, so V2 does not invent an “unlimited” yield.</i>`;
+  }
+  const best = typeof entry.fractionOfBest === "number" ? `${(entry.fractionOfBest * 100).toFixed(0)}% of best` : "";
+  const lines = [
+    `💸 <b>Usage value</b>  <code>${paidRankLabel(entry)}</code>`,
+    `~<b>${amount(entry.requestsPerDollar)}</b> equivalent agent requests / $1 · ${best}`,
+    `~${cost(entry.costPerEquivalentRequest)} / standardized request`,
+  ];
+  if (entry.regimes?.time) {
+    lines.push(`<i>Off-peak ~${amount(entry.regimes.time.offPeakRequestsPerDollar)} req/$ · Peak ~${amount(entry.regimes.time.peakRequestsPerDollar)} req/$ · peak usage ${pct(entry.regimes.time.peakUsagePenaltyPercent)}</i>`);
+  } else if (entry.variantCount > 1) {
+    lines.push(`<i>${entry.variantCount} pricing variants are applied by workload/context semantics; rank is not based on the cheapest row.</i>`);
+  }
+  if (entry.confidence !== "high") lines.push(`<i>Evidence confidence: ${esc(entry.confidence)}</i>`);
+  return lines.join("\n");
+}
+
+function calibrationLine(ranking) {
+  const count = ranking?.calibration?.stats?.uniqueWorkloads;
+  return count ? `<i>V2 prices every paid Zen model against the same ${count}-shape OpenCode Go agent workload corpus.</i>` : "";
 }
 
 function lifecycleBlocks(changes, ranking) {
@@ -85,7 +117,8 @@ function lifecycleBlocks(changes, ranking) {
     blocks.push([
       `${icon} <b>${title}</b>`,
       modelLine(model),
-      added ? zenCheapnessLine(ranking, model) : "",
+      added ? zenUsageValueLine(ranking, model) : "",
+      added && !free ? calibrationLine(ranking) : "",
       free ? `<b>${added ? "Free access is now available" : "Free access was removed"}</b>` : "",
       associated.some((item) => item.type.includes("pricing")) ? `💰 ${added ? "Pricing row published" : "Pricing row removed"}` : "",
     ].filter(Boolean).join("\n"));
@@ -93,8 +126,8 @@ function lifecycleBlocks(changes, ranking) {
   return { blocks, consumed };
 }
 
-function renderBlocks(changes, snapshot) {
-  const ranking = buildZenCheapnessRanking(snapshot);
+function renderBlocks(changes, snapshot, calibrationSource) {
+  const ranking = buildZenUsageYieldRanking(snapshot, calibrationSource);
   const { blocks, consumed } = lifecycleBlocks(changes, ranking);
   const priceGroups = new Map();
   changes.forEach((change, index) => {
@@ -105,7 +138,7 @@ function renderBlocks(changes, snapshot) {
   for (const [row, group] of priceGroups) {
     group.forEach((item) => consumed.add(item.__index));
     const discount = group.some((item) => typeof item.before === "number" && typeof item.after === "number" && item.after < item.before);
-    blocks.push(`${discount ? "🏷️" : "💰"} <b>${discount ? "ZEN PRICE DROP" : "ZEN PRICING CHANGED"}</b>\n<b>${esc(row)}</b>\n${zenCheapnessLine(ranking, basePricingName(row))}\n${group.map((item) => `${priceLabel(item.field)}: <code>${money(item.before)} → ${money(item.after)}</code>${item.percent == null ? "" : `  ${item.after < item.before ? "▼" : "▲"} ${pct(item.percent)}`}`).join("\n")}`);
+    blocks.push(`${discount ? "🏷️" : "💰"} <b>${discount ? "ZEN PRICE DROP" : "ZEN PRICING CHANGED"}</b>\n<b>${esc(row)}</b>\n${zenUsageValueLine(ranking, basePricingName(row))}\n${group.map((item) => `${priceLabel(item.field)}: <code>${money(item.before)} → ${money(item.after)}</code>${item.percent == null ? "" : `  ${item.after < item.before ? "▼" : "▲"} ${pct(item.percent)}`}`).join("\n")}`);
   }
 
   changes.forEach((change, index) => {
@@ -113,16 +146,16 @@ function renderBlocks(changes, snapshot) {
     consumed.add(index);
     switch (change.type) {
       case "zen_model_became_free":
-        blocks.push(`🆓 <b>MODEL BECAME FREE</b>\n${modelLine(change.after)}\n${zenCheapnessLine(ranking, change.after)}\n<b>Paid → Free</b>`);
+        blocks.push(`🆓 <b>MODEL BECAME FREE</b>\n${modelLine(change.after)}\n${zenUsageValueLine(ranking, change.after)}\n<b>Paid → Free</b>`);
         break;
       case "zen_model_no_longer_free":
-        blocks.push(`💳 <b>MODEL NO LONGER FREE</b>\n${modelLine(change.after ?? change.before)}\n${zenCheapnessLine(ranking, change.after ?? change.before)}\n<b>Free → Paid</b>`);
+        blocks.push(`💳 <b>MODEL NO LONGER FREE</b>\n${modelLine(change.after ?? change.before)}\n${zenUsageValueLine(ranking, change.after ?? change.before)}\n<b>Free → Paid</b>`);
         break;
       case "zen_pricing_row_added":
-        blocks.push(`💰 <b>ZEN PRICING ROW ADDED</b>\n<b>${esc(change.key)}</b>\n${zenCheapnessLine(ranking, basePricingName(change.key))}\n<code>in ${money(change.after?.inputPerM)} · out ${money(change.after?.outputPerM)} · cache ${money(change.after?.cachedReadPerM)}</code>`);
+        blocks.push(`💰 <b>ZEN PRICING ROW ADDED</b>\n<b>${esc(change.key)}</b>\n${zenUsageValueLine(ranking, basePricingName(change.key))}\n<code>in ${money(change.after?.inputPerM)} · out ${money(change.after?.outputPerM)} · cache ${money(change.after?.cachedReadPerM)}</code>`);
         break;
       case "zen_pricing_row_removed":
-        blocks.push(`🧹 <b>ZEN PRICING ROW REMOVED</b>\n<b>${esc(change.key)}</b>\n${zenCheapnessLine(ranking, basePricingName(change.key))}`);
+        blocks.push(`🧹 <b>ZEN PRICING ROW REMOVED</b>\n<b>${esc(change.key)}</b>\n${zenUsageValueLine(ranking, basePricingName(change.key))}`);
         break;
       case "zen_endpoint_added":
         blocks.push(`🔌 <b>ZEN ENDPOINT ADDED</b>\n${modelLine(change.after)}`);
@@ -186,8 +219,8 @@ function headline(changes) {
   return "🟣 <b>OPENCODE ZEN WATCH</b>";
 }
 
-export function buildZenChangeMessages(changes, snapshot, timeZone = "America/Chicago") {
-  const blocks = renderBlocks(changes, snapshot);
+export function buildZenChangeMessages(changes, snapshot, timeZone = "America/Chicago", calibrationSource = null) {
+  const blocks = renderBlocks(changes, snapshot, calibrationSource);
   const header = `${headline(changes)}\n━━━━━━━━━━━━━━━━━━━━\n<b>${changes.length}</b> semantic field change${changes.length === 1 ? "" : "s"} · <b>${blocks.length}</b> update card${blocks.length === 1 ? "" : "s"}`;
   const footer = `\n\n🕒 ${esc(time(snapshot.checkedAt, timeZone))}\n🔎 Zen models API + Zen docs`;
   const out = [];
