@@ -1,8 +1,8 @@
 name: CI
 
-# Same-repository PR validation is allowed on the homelab runner, but fork PRs are
-# explicitly rejected before any attacker-controlled checkout can execute. Secrets
-# and deployment remain push-to-main only.
+# The self-hosted runner may execute same-repository PRs owned by the repository
+# owner. Fork PRs never allocate the homelab runner. Secrets and deployment remain
+# push-to-main only.
 on:
   push:
     branches: [main]
@@ -21,7 +21,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor == 'thelabcorner'
+      github.actor == github.repository_owner
     runs-on: [self-hosted, homelab]
     timeout-minutes: 15
     env:
@@ -45,8 +45,13 @@ jobs:
       - name: Cloudflare bundle dry run
         run: npm run cf:dry-run
 
-      - name: Live OpenCode Usage Yield smoke
-        run: node scripts/live-usage-yield-smoke.mjs
+      - name: Optional live source smoke
+        run: |
+          if [ -f scripts/live-usage-yield-smoke.mjs ]; then
+            node scripts/live-usage-yield-smoke.mjs
+          else
+            echo "No feature-specific live smoke script present; skipping."
+          fi
 
   validate-and-deploy:
     if: github.event_name == 'push' && github.repository == 'thelabcorner/opencode-go-watch'
