@@ -4,6 +4,7 @@ import { resilientSourceFetch } from "./resilient-fetch.js";
 import { shouldRecordFailure } from "./resource-budget.js";
 import { dashboard, dashboardScript } from "./dashboard.js";
 import { zenDashboard, zenDashboardScript } from "./zen-dashboard.js";
+import { goUsageValueSection, zenUsageValueSection } from "./usage-value-dashboard.js";
 import { getZenStatus, readZenSnapshot, recordZenFailure, resetZenBaseline, runZenWatch } from "./zen.js";
 import { buildZenBootMessage, buildZenChangeMessages, buildZenErrorMessage, buildZenRecoveryMessage, sendZenTelegram } from "./zen-telegram.js";
 import {
@@ -48,11 +49,20 @@ async function previousError(env) {
   return env.STATE ? env.STATE.get(ERROR_KEY, { type: "json" }) : null;
 }
 
-function decorateGoDashboard(html) {
+function decorateGoDashboard(html, snapshot) {
+  const usageValue = goUsageValueSection(snapshot);
   return html
     .replaceAll(`${UNKNOWN_PROVIDER_LOGO}<span>Qwen`, `${ALIBABA_PROVIDER_LOGO}<span>Qwen`)
     .replaceAll(`${UNKNOWN_PROVIDER_LOGO}<div><strong>Qwen`, `${ALIBABA_PROVIDER_LOGO}<div><strong>Qwen`)
-    .replace('<a href="#models">Models</a>', '<a href="#models">Models</a><a href="/zen">Zen</a>');
+    .replace('<a href="#models">Models</a>', '<a href="#usage-value">Value</a><a href="#models">Models</a><a href="/zen">Zen</a>')
+    .replace("</main>", `${usageValue}</main>`);
+}
+
+function decorateZenDashboard(html, snapshot, goCalibration) {
+  const usageValue = zenUsageValueSection(snapshot, goCalibration);
+  return html
+    .replace('<a href="#models">Models</a>', '<a href="#usage-value">Value</a><a href="#models">Models</a>')
+    .replace("</main>", `${usageValue}</main>`);
 }
 
 async function safeArchive(env, event) {
@@ -178,11 +188,11 @@ export default {
     if (request.method === "GET" && url.pathname === "/zen-dashboard.js") return new Response(zenDashboardScript, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=300", ...SECURITY_HEADERS } });
     if (request.method === "GET" && url.pathname === "/") {
       const [status, history] = await Promise.all([getStatus(env), readAlertHistory(env, 24)]);
-      return new Response(decorateGoDashboard(dashboard(status, history)), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
+      return new Response(decorateGoDashboard(dashboard(status, history), status.snapshot), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
     }
     if (request.method === "GET" && (url.pathname === "/zen" || url.pathname === "/zen/")) {
       const [status, history, goCalibration] = await Promise.all([getZenStatus(env), readAlertHistory(env, 96), readSnapshot(env)]);
-      return new Response(zenDashboard(status, history, goCalibration), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
+      return new Response(decorateZenDashboard(zenDashboard(status, history), status.snapshot, goCalibration), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
     }
     if (request.method === "GET" && url.pathname === "/health") {
       const status = await getStatus(env); return json({ ok: status.ok, configured: status.configured, meta: status.meta, error: status.error }, status.ok ? 200 : 503);
