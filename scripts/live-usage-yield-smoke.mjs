@@ -73,6 +73,14 @@ for (const entry of zenRanking.freeEntries) {
   }
 }
 
+const unrankedZen = zenRanking.unrankedEntries.map((entry) => ({
+  name: entry.name,
+  warnings: entry.warnings,
+}));
+if (unrankedZen.length > 5) {
+  throw new Error(`Unexpectedly many Zen paid models are unranked: ${JSON.stringify(unrankedZen)}`);
+}
+
 const deepSeek = ["DeepSeek V4 Flash", "DeepSeek V4 Pro"]
   .map((name) => usageYieldFor(goRanking, name))
   .find(Boolean);
@@ -90,13 +98,14 @@ console.log(JSON.stringify({
     parsedModels: Object.keys(goSnapshot.docs.requests).length,
     rankedPaid: goRanking.paidEntries.length,
     quotaExempt: quotaExempt.length,
+    unranked: goRanking.unrankedEntries.map((entry) => ({ name: entry.name, warnings: entry.warnings })),
     best: goBest ? { name: goBest.name, rank: goBest.rank, monthlyEquivalentRequests: goBest.goCapacity?.monthlyEquivalentRequests } : null,
   },
   zen: {
     apiModels: Object.keys(zenSnapshot.models).length,
     free: zenRanking.freeEntries.length,
     rankedPaid: zenRanking.paidEntries.length,
-    unrankedPaid: zenRanking.unrankedEntries.length,
+    unrankedPaid: unrankedZen,
     best: zenBest ? { name: zenBest.name, rank: zenBest.rank, requestsPerDollar: zenBest.requestsPerDollar } : null,
   },
 }, null, 2));
