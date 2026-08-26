@@ -1,7 +1,7 @@
 import { sha256Text } from "./fingerprint.js";
 import { buildStandardWorkloadCorpus } from "./usage-yield.js";
 
-export const USAGE_CALIBRATION_KEY = "usage-calibration:v2";
+const GO_SNAPSHOT_KEY = "snapshot:v1";
 
 export async function buildUsageCalibration(snapshot) {
   const corpus = buildStandardWorkloadCorpus(snapshot?.docs?.profiles ?? {});
@@ -18,21 +18,14 @@ export async function buildUsageCalibration(snapshot) {
   };
 }
 
+/**
+ * Zen reads the last accepted Go semantic baseline and derives the calibration from
+ * it. This costs one small KV read per Zen check but avoids another persistent key,
+ * keeps Go as the sole authority for its observed profiles, and makes recalibration
+ * atomic with the same baseline that already passed Go validation/Telegram delivery.
+ */
 export async function readUsageCalibration(env) {
   if (!env?.STATE) return null;
-  return env.STATE.get(USAGE_CALIBRATION_KEY, { type: "json" });
-}
-
-/**
- * Persist the tiny shared Go workload calibration only when its workload shape
- * changes. Go remains the sole writer; Zen consumes the last known-good corpus.
- */
-export async function syncUsageCalibration(env, snapshot) {
-  if (!env?.STATE) return null;
-  const next = await buildUsageCalibration(snapshot);
-  if (!next) return null;
-  const current = await readUsageCalibration(env);
-  if (current?.fingerprint === next.fingerprint) return current;
-  await env.STATE.put(USAGE_CALIBRATION_KEY, JSON.stringify(next));
-  return next;
+  const goSnapshot = await env.STATE.get(GO_SNAPSHOT_KEY, { type: "json" });
+  return buildUsageCalibration(goSnapshot);
 }
