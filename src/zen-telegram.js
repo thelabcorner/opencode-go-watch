@@ -3,6 +3,7 @@ import { basePricingName, buildZenUsageYieldRanking, usageYieldFor } from "./usa
 
 const MAX_MESSAGE = 3850;
 const NUMBER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
+const YIELD = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const COST = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 });
 const TIME = new Map();
 
@@ -22,7 +23,7 @@ function cost(value) {
 }
 
 function amount(value) {
-  return typeof value === "number" && Number.isFinite(value) ? NUMBER.format(value) : "—";
+  return typeof value === "number" && Number.isFinite(value) ? YIELD.format(value) : "—";
 }
 
 function pct(value) {
