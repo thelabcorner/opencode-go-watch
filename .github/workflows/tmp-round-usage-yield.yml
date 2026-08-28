@@ -2,14 +2,14 @@ name: Temporary Usage Yield rounding patch
 
 on:
   push:
-    branches: [fix/usage-yield-telegram-rounding]
+    branches:
+      - 'fix/usage-yield-telegram-rounding'
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: [self-hosted, homelab]
     timeout-minutes: 5
     steps:
