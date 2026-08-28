@@ -41,6 +41,9 @@ test("Go new-model Telegram card reports Usage Yield V2 using standardized work"
   assert.match(messages[0], /equivalent req\/\$/);
   assert.match(messages[0], /V2 normalizes every paid model against the same/);
   assert.doesNotMatch(messages[0], /cheapest published tier/i);
+  assert.match(messages[0], /~<b>[\d,]+<\/b> standardized requests \/ Go monthly allowance/);
+  assert.match(messages[0], /~<b>[\d,]+<\/b> equivalent req\/\$/);
+  assert.doesNotMatch(messages[0], /~<b>[\d,]+\.\d+<\/b> (?:standardized requests|equivalent req\/\$)/);
 });
 
 test("Go pricing-change card recomputes the affected model's current Usage Value rank", () => {
@@ -119,6 +122,8 @@ test("Zen price-drop card uses shared Go workload calibration and paid requests-
   assert.match(messages[0], /equivalent agent requests \/ \$1/);
   assert.match(messages[0], /100% of best/);
   assert.doesNotMatch(messages[0], /Index = input \+ output/);
+  assert.match(messages[0], /~<b>[\d,]+<\/b> equivalent agent requests \/ \$1/);
+  assert.doesNotMatch(messages[0], /~<b>[\d,]+\.\d+<\/b> equivalent agent requests \/ \$1/);
 });
 
 test("Zen paid-model alert is explicit when Go calibration is unavailable", () => {

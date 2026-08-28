@@ -4,6 +4,7 @@ import { basePricingName, buildGoUsageYieldRanking, usageYieldFor } from "./usag
 const MAX_MESSAGE = 3850;
 const CHAT_ID_KEY = "telegram:chat_id:v1";
 const NUMBER_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
+const YIELD_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const COST_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 });
 const TIME_FORMATTERS = new Map();
 const LABELS = Object.freeze({
@@ -49,7 +50,7 @@ function fmtCost(value) {
 }
 function fmtYield(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "—";
-  return NUMBER_FORMATTER.format(value);
+  return YIELD_FORMATTER.format(value);
 }
 function fmtPercent(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
