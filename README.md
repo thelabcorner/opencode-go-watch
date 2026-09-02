@@ -1,6 +1,6 @@
 # OpenCode Go + Zen Watch
 
-A zero-server Cloudflare Worker that semantically monitors **OpenCode Go** usage economics and the **OpenCode Zen** model catalog, then sends rich Telegram alerts only when something meaningful changes.
+A zero-server Cloudflare Worker that semantically monitors **OpenCode Go** usage economics and model availability plus the **OpenCode Zen** model catalog, then sends rich Telegram alerts only when something meaningful changes.
 
 The project is deliberately not a whole-page hash watcher. It understands models, request limits, pricing variants, promotions, free-model availability, endpoint routing, deprecations, documentation notes, and cross-source consistency. If a monitored source changes in a way the semantic model does not understand yet, a residual fallback still surfaces the unexplained change instead of silently discarding it.
 
@@ -15,16 +15,25 @@ Both dashboards are server-rendered, dependency-free, responsive across desktop/
 
 ## OpenCode Go monitoring
 
+Go is monitored from three complementary surfaces rather than treating any single page as the complete source of truth:
+
 ### Sources
 
-- `https://opencode.ai/go` — live Go request chart and promotions.
-- `https://opencode.ai/docs/go/` — usage limits, pricing, request profiles, notes, and global subscription allowances.
+1. `https://opencode.ai/zen/go/v1/models` — **authoritative public Go availability catalog**. This is the machine-readable list of model IDs OpenCode currently advertises through the Go API namespace.
+2. `https://opencode.ai/go` — live Go request chart and promotions.
+3. `https://opencode.ai/docs/go/` — usage limits, pricing, request profiles, notes, and global subscription allowances.
+
+The API catalog and docs are intentionally **not required to contain identical model sets**. OpenCode can expose a model through the Go API before the human-facing docs or economic tables are updated. The watcher therefore treats an API-only model as a real availability state, not as a parser failure or automatic docs mismatch.
+
+The Go models API also emits a fresh `created` timestamp on every response. The watcher canonicalizes the catalog before fingerprinting, ignores that volatile timestamp, sorts model IDs, and tracks only stable availability/metadata. Polling the API therefore does not generate false changes on every request.
 
 ### Semantic changes
 
 | Category | Detected change | Telegram treatment |
 | --- | --- | --- |
 | Model lifecycle | request-table model added / removed | rich `NEW MODEL` / `MODEL REMOVED` card |
+| **API availability** | model added / removed from `/zen/go/v1/models` | dedicated Go API model availability card |
+| **API metadata** | stable advertised API metadata changes | dedicated Go API metadata card |
 | Request limits | 5-hour / weekly / monthly estimate changed | grouped per-model percentage deltas |
 | Subscription allowance | 5-hour / weekly / monthly dollar allowance changed | grouped allowance card |
 | Request profile | input/cached/output request assumptions changed | request-profile card |
@@ -33,11 +42,16 @@ Both dashboards are server-rendered, dependency-free, responsive across desktop/
 | Promotion | multiplier / bonus / banner changed | usage-update card |
 | Cross-check | chart and docs disagree unexpectedly | mismatch warning / resolved notice |
 | Usage notes | DeepSeek peak hours, disclaimers, relevant wording | before/after note card |
-| Unknown semantic | monitored source changed but known fields did not | residual `UNCLASSIFIED MONITORED CHANGE` |
+| Unknown semantic | monitored landing/docs source changed but known fields did not | residual `UNCLASSIFIED MONITORED CHANGE` |
+| **Unknown API semantic** | stable unmodeled Go API metadata changes | residual Go API unclassified card |
 | Operational | fetch / parse / validation failure | error alert; known-good baseline preserved |
 | Recovery | source becomes healthy again | recovery alert |
 
 Related lifecycle changes are coalesced. A new model that simultaneously adds a request row, price row, request profile, and chart entry becomes one Telegram model card rather than four notifications.
+
+The Go API source also has its own catastrophic-shrink protection. A suspicious mass disappearance from the catalog is rejected rather than being accepted as dozens of model removals, and the known-good baseline is preserved.
+
+When the API source is introduced to an existing installation, its current catalog is silently seeded into the Go baseline. Existing models are not announced as newly added simply because the watcher gained a new source.
 
 ---
 
@@ -170,24 +184,24 @@ Go and Zen have **independent baselines and error states**. A Zen outage cannot 
 ```text
 Cloudflare Cron · every 5 minutes
         |
-        +-----------------------+
-        |                       |
-        v                       v
-   Go monitor              Zen monitor
- chart + Go docs       Zen API + Zen docs
-        |                       |
-        v                       v
+        +--------------------------+
+        |                          |
+        v                          v
+   Go monitor                 Zen monitor
+ API + chart + docs        Zen API + Zen docs
+        |                          |
+        v                          v
  conditional GETs / ETag / Last-Modified
         |
         v
- monitored-region SHA-256 fallback
+ canonical semantic fingerprint / SHA-256 fallback
         |
-        +---- identical ----> no parse / no Telegram / no baseline write
+        +---- identical ----> no semantic parse / no Telegram / no baseline write
         |
         v
  semantic parser + transition validation
         |
-        +---- suspicious parser shrink/failure
+        +---- suspicious parser/catalog shrink or failure
         |          |
         |          +---- preserve previous baseline + operational alert
         |
@@ -215,7 +229,7 @@ The baseline advances only after required Telegram delivery succeeds. If notific
 - `zen:meta:v1`
 - `zen:error:v1`
 
-Go retains its existing independent state.
+Go retains its existing independent state, with the Go API catalog stored inside the same Go semantic snapshot and hot-source inventory as the landing and docs sources.
 
 ---
 
@@ -224,15 +238,16 @@ Go retains its existing independent state.
 Both monitors are designed around Cloudflare Free-tier efficiency:
 
 1. tiny hot records hold validators + fingerprints
-2. conditional GETs use ETag / Last-Modified
+2. conditional GETs use ETag / Last-Modified where representation validators are stable
 3. `304` skips body decoding, parsing, snapshot reads, and semantic diffing
 4. same-ETag `200` bodies are cancelled
-5. if validators are absent, native `crypto.subtle` SHA-256 gates parsing
-6. only changed sources are reparsed; unchanged halves reuse the baseline
-7. unchanged checks do not rewrite the semantic snapshot
-8. heartbeat metadata persists only about hourly
-9. Go and Zen scheduled work runs concurrently and fails independently
-10. expensive residual normalization only runs after a monitored source actually changes
+5. if validators are absent or unsuitable, native `crypto.subtle` SHA-256 gates semantic parsing
+6. the Go models API is canonicalized before fingerprinting so its volatile `created` timestamp cannot dirty state
+7. only changed sources are reparsed; unchanged sources reuse the baseline
+8. unchanged checks do not rewrite the semantic snapshot
+9. heartbeat metadata persists only about hourly
+10. Go and Zen scheduled work runs concurrently and fails independently
+11. expensive residual normalization only runs after a monitored source actually changes
 
 Source GETs get one safe retry on transient network/timeout/5xx failures. Telegram POSTs are deliberately **not** automatically retried because an ambiguous POST retry could duplicate an alert.
 
@@ -258,11 +273,12 @@ The Go dashboard shows recent Go activity; `/zen` filters the same archive to Ze
 
 - unchanged checks send **nothing**
 - related model lifecycle changes are coalesced
-- fields for one pricing/request/profile/chart object are grouped
+- fields for one pricing/request/profile/chart/API object are grouped
 - one polling run emits as few messages as possible
 - Telegram payloads split only near the 3,850-character safety threshold
 - identical operational failures are deduplicated with long reminder spacing
 - Go and Zen use separate operational error states
+- enabling Go API monitoring on an existing baseline does not announce the existing catalog as newly added
 
 Separate real changes published in different five-minute snapshots can still generate separate notifications.
 
@@ -325,12 +341,15 @@ The committed non-secret source configuration is:
 ```toml
 OPENCODE_GO_URL = "https://opencode.ai/go"
 OPENCODE_DOCS_URL = "https://opencode.ai/docs/go/"
+OPENCODE_GO_MODELS_URL = "https://opencode.ai/zen/go/v1/models"
 OPENCODE_ZEN_DOCS_URL = "https://opencode.ai/docs/zen/"
 OPENCODE_ZEN_MODELS_URL = "https://opencode.ai/zen/v1/models"
 TIMEZONE = "America/Chicago"
 NOTIFY_ON_BOOTSTRAP = "true"
 NOTIFY_ON_ZEN_BOOTSTRAP = "true"
 ```
+
+`OPENCODE_GO_MODELS_URL` enables the machine-readable Go availability watcher. On migration from an older baseline, the current API catalog is seeded silently; subsequent stable additions, removals, or metadata changes become semantic Go alerts.
 
 `NOTIFY_ON_ZEN_BOOTSTRAP=true` means the first successful Zen baseline sends one compact `ZEN WATCH · ARMED` message containing current API/documented/free counts. It does **not** announce every existing model as newly added.
 
@@ -347,6 +366,14 @@ npx wrangler deploy
 
 Wrangler automatically provisions/binds the `STATE` KV namespace when required. The same `*/5 * * * *` cron drives Go and Zen; no second scheduled Worker is needed.
 
+To trigger Go's three-source check immediately after deployment:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://YOUR-WORKER.workers.dev/check
+```
+
 To trigger Zen baseline creation immediately after deployment:
 
 ```bash
@@ -358,6 +385,7 @@ curl -X POST \
 Then open:
 
 ```text
+https://YOUR-WORKER.workers.dev/
 https://YOUR-WORKER.workers.dev/zen
 ```
 
@@ -371,4 +399,4 @@ npm run test:coverage
 npm run bench
 ```
 
-The regression suite covers Go parser history, semantic diffs, unknown-change fallback, Telegram grouping, delivery safety, transition circuit breakers, conditional-request hot paths, Brotli history, responsive dashboards, Zen docs/API parsing, free-model lifecycle, discounts/price drops, owner changes, deprecations, Zen unknown-change fallback, Zen route security, independent baseline reset, and Zen `304` fast paths.
+The regression suite covers Go parser history, Go models API canonicalization and semantic availability diffs, volatile timestamp suppression, API baseline migration, suspicious catalog shrink protection, semantic diffs, unknown-change fallback, Telegram grouping, delivery safety, transition circuit breakers, conditional-request hot paths, Brotli history, responsive dashboards, Zen docs/API parsing, free-model lifecycle, discounts/price drops, owner changes, deprecations, Zen unknown-change fallback, Zen route security, independent baseline reset, and Zen `304` fast paths.
