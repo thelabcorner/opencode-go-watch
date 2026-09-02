@@ -36,8 +36,8 @@ test("source map keeps monitored Go/Zen namespaces explicit", () => {
   assert.match(sourceMap, /same model name does not imply same model ID/i);
   assert.match(sourceMap, /free.*unlimited.*different dimensions/is);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/go\/index\.tsx/);
-  assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/zen\/go\/v1\/models\.tsx/);
-  assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/zen\/util\/modelsHandler\.tsx/);
+  assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/zen\/go\/v1\/models\.ts/);
+  assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/zen\/util\/modelsHandler\.ts/);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/web\/src\/content\/docs\/go\.mdx/);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/web\/src\/content\/docs\/zen\.mdx/);
 });
