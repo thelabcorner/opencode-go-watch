@@ -1,3 +1,4 @@
+import { parseGoModelsApi } from "../src/go-api.js";
 import { parseDocsPage, parseGoPage } from "../src/parsers.js";
 import { buildZenSnapshot, parseZenDocs, parseZenModelsApi, validateZenSnapshot } from "../src/zen.js";
 import { buildGoUsageYieldRanking, buildZenUsageYieldRanking, usageYieldFor } from "../src/usage-yield.js";
@@ -6,6 +7,7 @@ import { validateSnapshot } from "../src/watcher.js";
 const URLS = {
   go: process.env.OPENCODE_GO_URL || "https://opencode.ai/go",
   goDocs: process.env.OPENCODE_DOCS_URL || "https://opencode.ai/docs/go/",
+  goModels: process.env.OPENCODE_GO_MODELS_URL || "https://opencode.ai/zen/go/v1/models",
   zenDocs: process.env.OPENCODE_ZEN_DOCS_URL || "https://opencode.ai/docs/zen/",
   zenModels: process.env.OPENCODE_ZEN_MODELS_URL || "https://opencode.ai/zen/v1/models",
 };
@@ -14,7 +16,7 @@ async function get(url, accept) {
   const response = await fetch(url, {
     headers: {
       accept,
-      "user-agent": "opencode-go-watch-live-smoke/2",
+      "user-agent": "opencode-go-watch-live-smoke/3",
       "cache-control": "no-cache",
     },
     signal: AbortSignal.timeout(20_000),
@@ -25,21 +27,23 @@ async function get(url, accept) {
   return text;
 }
 
-const [goHtml, goDocsHtml, zenDocsHtml, zenModelsJson] = await Promise.all([
+const [goHtml, goDocsHtml, goModelsJson, zenDocsHtml, zenModelsJson] = await Promise.all([
   get(URLS.go, "text/html"),
   get(URLS.goDocs, "text/html"),
+  get(URLS.goModels, "application/json"),
   get(URLS.zenDocs, "text/html"),
   get(URLS.zenModels, "application/json"),
 ]);
 
 const checkedAt = new Date().toISOString();
 const goSnapshot = {
-  schema: 4,
+  schema: 5,
   checkedAt,
-  sources: { go: URLS.go, docs: URLS.goDocs },
+  sources: { go: URLS.go, docs: URLS.goDocs, api: URLS.goModels },
   sourceState: {},
   go: parseGoPage(goHtml),
   docs: parseDocsPage(goDocsHtml),
+  api: parseGoModelsApi(goModelsJson),
 };
 validateSnapshot(goSnapshot);
 
@@ -96,6 +100,7 @@ console.log(JSON.stringify({
   calibrationMedianContext: goRanking.calibration.stats.contextMedian,
   go: {
     parsedModels: Object.keys(goSnapshot.docs.requests).length,
+    apiModels: goSnapshot.api.modelIds.length,
     rankedPaid: goRanking.paidEntries.length,
     quotaExempt: quotaExempt.length,
     unranked: goRanking.unrankedEntries.map((entry) => ({ name: entry.name, warnings: entry.warnings })),

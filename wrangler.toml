@@ -35,6 +35,7 @@ crons = ["*/1 * * * *"]
 [vars]
 OPENCODE_GO_URL = "https://opencode.ai/go"
 OPENCODE_DOCS_URL = "https://opencode.ai/docs/go/"
+OPENCODE_GO_MODELS_URL = "https://opencode.ai/zen/go/v1/models"
 OPENCODE_ZEN_DOCS_URL = "https://opencode.ai/docs/zen/"
 OPENCODE_ZEN_MODELS_URL = "https://opencode.ai/zen/v1/models"
 WATCHER_DASHBOARD_URL = "https://oc-watcher.thedabcorner.site"

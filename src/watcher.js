@@ -1,6 +1,12 @@
 import { diffSnapshots } from "./diff.js";
 import { sha256Text } from "./fingerprint.js";
 import {
+  buildGoApiChangeMessages,
+  diffGoModelsApi,
+  isGoApiChange,
+  prepareGoModelsApi,
+} from "./go-api.js";
+import {
   parsePreparedDocsPage,
   parsePreparedGoPage,
   prepareDocsPage,
@@ -19,10 +25,11 @@ const SNAPSHOT_KEY = "snapshot:v1";
 const HOT_KEY = "hot:v1";
 const META_KEY = "meta:v1";
 const ERROR_KEY = "error:v1";
-const SNAPSHOT_SCHEMA = 4;
+const SNAPSHOT_SCHEMA = 5;
 const ERROR_REPEAT_MS = 6 * 60 * 60 * 1000;
 const HEARTBEAT_MS = 60 * 60 * 1000;
 const MAX_PAGE_BYTES = 5_000_000;
+const MIN_GO_API_MODELS = 10;
 
 function countKeys(value) {
   return value ? Object.keys(value).length : 0;
@@ -40,6 +47,13 @@ export function validateSnapshot(snapshot) {
   if (pricingCount < 10) errors.push(`docs pricing table found ${pricingCount} rows; refusing baseline update`);
   if (profileCount < 8) errors.push(`docs request profiles found ${profileCount} models; refusing baseline update`);
   if (countKeys(snapshot.docs?.limits) !== 3) errors.push("docs dollar limits are incomplete");
+
+  if (snapshot.sources?.api) {
+    const apiCount = snapshot.api?.modelIds?.length ?? 0;
+    if (apiCount < MIN_GO_API_MODELS) errors.push(`Go models API found ${apiCount} models; refusing baseline update`);
+    if (!snapshot.api?.models || snapshot.api.models.length !== apiCount) errors.push("Go models API semantic model list is incomplete");
+    if (new Set(snapshot.api?.modelIds ?? []).size !== apiCount) errors.push("Go models API contains duplicate model IDs");
+  }
 
   for (const [name, row] of Object.entries(snapshot.docs?.requests ?? {})) {
     if (row.unlimited === true) {
@@ -66,8 +80,9 @@ export function validateSnapshot(snapshot) {
   if (errors.length) throw new Error(`Snapshot validation failed: ${errors.join("; ")}`);
 }
 
-function hotFromSnapshot(snapshot) {
+function hotFromSnapshot(snapshot, requireApi = false) {
   if (snapshot?.schema !== SNAPSHOT_SCHEMA || !snapshot.sourceState?.go || !snapshot.sourceState?.docs) return null;
+  if (requireApi && !snapshot.sourceState?.api) return null;
   return { schema: SNAPSHOT_SCHEMA, sourceState: snapshot.sourceState };
 }
 
@@ -95,11 +110,11 @@ async function cancelBody(response) {
   }
 }
 
-async function fetchPage(url, fetchImpl, previousSource) {
+async function fetchPage(url, fetchImpl, previousSource, accept = "text/html,application/xhtml+xml") {
   const response = await fetchImpl(url, {
     headers: {
-      accept: "text/html,application/xhtml+xml",
-      "user-agent": "opencode-go-watch/1.2 (+https://github.com/thelabcorner/opencode-go-watch)",
+      accept,
+      "user-agent": "opencode-go-watch/1.3 (+https://github.com/thelabcorner/opencode-go-watch)",
       "cache-control": "no-cache",
       pragma: "no-cache",
       ...validatorHeaders(previousSource),
@@ -163,6 +178,7 @@ async function inspectSource({ response, previousSource, prepare }) {
 }
 
 function sameSourceState(a, b) {
+  if (!a && !b) return true;
   return Boolean(a && b)
     && a.fingerprint === b.fingerprint
     && a.etag === b.etag
@@ -173,31 +189,45 @@ function sameHot(a, b) {
   return Boolean(a && b)
     && a.schema === b.schema
     && sameSourceState(a.sourceState?.go, b.sourceState?.go)
-    && sameSourceState(a.sourceState?.docs, b.sourceState?.docs);
+    && sameSourceState(a.sourceState?.docs, b.sourceState?.docs)
+    && sameSourceState(a.sourceState?.api, b.sourceState?.api);
 }
 
 async function inspectSources(env, fetchImpl, hot) {
   const goUrl = env.OPENCODE_GO_URL || "https://opencode.ai/go";
   const docsUrl = env.OPENCODE_DOCS_URL || "https://opencode.ai/docs/go/";
+  const apiUrl = String(env.OPENCODE_GO_MODELS_URL ?? "").trim() || null;
   const previousGoSource = hot?.sourceState?.go ?? null;
   const previousDocsSource = hot?.sourceState?.docs ?? null;
+  const previousApiSource = apiUrl ? hot?.sourceState?.api ?? null : null;
 
-  const [goResponse, docsResponse] = await Promise.all([
+  const [goResponse, docsResponse, apiResponse] = await Promise.all([
     fetchPage(goUrl, fetchImpl, previousGoSource),
     fetchPage(docsUrl, fetchImpl, previousDocsSource),
+    apiUrl ? fetchPage(apiUrl, fetchImpl, previousApiSource, "application/json") : Promise.resolve(null),
   ]);
-  const [go, docs] = await Promise.all([
+  const [go, docs, api] = await Promise.all([
     inspectSource({ response: goResponse, previousSource: previousGoSource, prepare: prepareGoPage }),
     inspectSource({ response: docsResponse, previousSource: previousDocsSource, prepare: prepareDocsPage }),
+    apiResponse ? inspectSource({ response: apiResponse, previousSource: previousApiSource, prepare: prepareGoModelsApi }) : Promise.resolve(null),
   ]);
+
+  const sourceState = { go: go.sourceState, docs: docs.sourceState };
+  const optimization = { go: go.mode, docs: docs.mode };
+  if (api) {
+    sourceState.api = api.sourceState;
+    optimization.api = api.mode;
+  }
 
   return {
     goUrl,
     docsUrl,
+    apiUrl,
     go,
     docs,
-    hot: { schema: SNAPSHOT_SCHEMA, sourceState: { go: go.sourceState, docs: docs.sourceState } },
-    optimization: { go: go.mode, docs: docs.mode },
+    api,
+    hot: { schema: SNAPSHOT_SCHEMA, sourceState },
+    optimization,
   };
 }
 
@@ -208,15 +238,24 @@ function buildCandidate(previous, inspected, now) {
   const docs = inspected.docs.changed
     ? parsePreparedDocsPage(inspected.docs.prepared)
     : previous?.docs;
+  const api = inspected.api
+    ? inspected.api.changed
+      ? inspected.api.prepared?.api
+      : previous?.api
+    : null;
   if (!go || !docs) throw new Error("A semantic baseline is required to reuse an unchanged source");
+  if (inspected.api && !api) throw new Error("A Go models API baseline is required to reuse an unchanged API source");
 
+  const sources = { go: inspected.goUrl, docs: inspected.docsUrl };
+  if (inspected.apiUrl) sources.api = inspected.apiUrl;
   const snapshot = {
     schema: SNAPSHOT_SCHEMA,
     checkedAt: now.toISOString(),
-    sources: { go: inspected.goUrl, docs: inspected.docsUrl },
+    sources,
     sourceState: inspected.hot.sourceState,
     go,
     docs,
+    ...(api ? { api } : {}),
   };
   validateSnapshot(snapshot);
   return snapshot;
@@ -224,17 +263,18 @@ function buildCandidate(previous, inspected, now) {
 
 /**
  * Standalone collection helper used by tests/tools. runWatch uses a still cheaper
- * hot-state path which avoids loading the 10KB-ish semantic snapshot at all when
- * both sources are unchanged.
+ * hot-state path which avoids loading the full semantic snapshot when every source
+ * is unchanged.
  */
 export async function collectSnapshot(env, fetchImpl = fetch, now = new Date(), previous = null) {
-  const hot = hotFromSnapshot(previous);
+  const requireApi = Boolean(String(env.OPENCODE_GO_MODELS_URL ?? "").trim());
+  const hot = hotFromSnapshot(previous, requireApi);
   const inspected = await inspectSources(env, fetchImpl, hot);
   const snapshot = buildCandidate(previous, inspected, now);
   return {
     snapshot,
     optimization: inspected.optimization,
-    semanticDirty: !previous || inspected.go.changed || inspected.docs.changed || previous.schema !== SNAPSHOT_SCHEMA,
+    semanticDirty: !previous || inspected.go.changed || inspected.docs.changed || Boolean(inspected.api?.changed) || previous.schema !== SNAPSHOT_SCHEMA,
     sourceStateDirty: !hot || !sameHot(hot, inspected.hot),
   };
 }
@@ -252,6 +292,9 @@ export function validateTransition(previous, snapshot) {
     ["docs pricing table", countKeys(previous.docs?.pricing), countKeys(snapshot.docs?.pricing), 0.50, 8],
     ["docs request profiles", countKeys(previous.docs?.profiles), countKeys(snapshot.docs?.profiles), 0.50, 5],
   ];
+  if (previous.api && snapshot.api) {
+    checks.push(["Go API models", previous.api.modelIds?.length ?? 0, snapshot.api.modelIds?.length ?? 0, 0.50, 8]);
+  }
 
   for (const [label, before, after, maxDropFraction, minDrop] of checks) {
     if (!before || after >= before) continue;
@@ -300,29 +343,31 @@ async function loadSnapshotIfNeeded(env, existing) {
 }
 
 export async function runWatch(env, { fetchImpl = fetch, now = new Date(), forceNotify = false } = {}) {
-  // HOT_KEY is a few hundred bytes and contains only validators/fingerprints. The
-  // large semantic snapshot is deliberately absent from the common 5-minute path.
+  // HOT_KEY contains only validators/fingerprints. The large semantic snapshot is
+  // deliberately absent from the common one-minute path.
   let [hot, previousError] = await Promise.all([
     readHot(env),
     env.STATE.get(ERROR_KEY, { type: "json" }),
   ]);
   let previous = null;
+  const requireApi = Boolean(String(env.OPENCODE_GO_MODELS_URL ?? "").trim());
 
-  // One-time migration / recovery path for deployments created before HOT_KEY.
-  if (!hot || hot.schema !== SNAPSHOT_SCHEMA) {
+  // One-time migration / recovery path for deployments created before HOT_KEY or
+  // before the Go models API became part of the source inventory.
+  if (!hot || hot.schema !== SNAPSHOT_SCHEMA || requireApi && !hot.sourceState?.api) {
     previous = await readSnapshot(env);
-    hot = hotFromSnapshot(previous);
+    hot = hotFromSnapshot(previous, requireApi);
   }
 
   const inspected = await inspectSources(env, fetchImpl, hot);
   const optimization = inspected.optimization;
   const sourceStateDirty = !hot || !sameHot(hot, inspected.hot);
-  const semanticDirty = !hot || inspected.go.changed || inspected.docs.changed;
+  const semanticDirty = !hot || inspected.go.changed || inspected.docs.changed || Boolean(inspected.api?.changed);
   const checkedAt = now.toISOString();
   const timeZone = env.TIMEZONE || "America/Chicago";
 
-  // Absolute hot path: both upstream semantic regions are proven identical. No
-  // 10KB semantic snapshot read, no HTML parser, no validation walk, no diff engine.
+  // Absolute hot path: all configured upstream semantic regions are proven
+  // identical. No semantic snapshot read, parser walk, validation, or diff engine.
   if (!semanticDirty && previous?.schema !== 1) {
     if (sourceStateDirty) await writeHot(env, inspected.hot);
 
@@ -331,7 +376,7 @@ export async function runWatch(env, { fetchImpl = fetch, now = new Date(), force
       const current = { ...previous, checkedAt, sourceState: inspected.hot.sourceState };
       const manual = buildBootMessage(current, timeZone)
         .replace("OPENCODE GO WATCH · ARMED", "OPENCODE GO WATCH · MANUAL CHECK")
-        .replace("Baseline captured. Semantic monitoring is live.", "No semantic changes detected. Current pages parse cleanly.");
+        .replace("Baseline captured. Semantic monitoring is live.", "No semantic changes detected. Current sources parse cleanly.");
       await sendTelegram(env, manual, fetchImpl);
     }
     await maybeHeartbeat(env, checkedAt);
@@ -368,11 +413,20 @@ export async function runWatch(env, { fetchImpl = fetch, now = new Date(), force
   }
 
   validateTransition(previous, snapshot);
-  const changes = diffSnapshots(previous, snapshot);
+  const changes = [
+    ...diffSnapshots(previous, snapshot),
+    ...diffGoModelsApi(previous.api, snapshot.api),
+  ];
   const needsSchemaUpgrade = previous.schema !== SNAPSHOT_SCHEMA;
+  const needsApiBaseline = Boolean(snapshot.api && !previous.api);
 
   if (changes.length) {
-    const messages = buildChangeMessages(changes, snapshot, timeZone);
+    const regularChanges = changes.filter((change) => !isGoApiChange(change));
+    const apiChanges = changes.filter(isGoApiChange);
+    const messages = [
+      ...(regularChanges.length ? buildChangeMessages(regularChanges, snapshot, timeZone) : []),
+      ...buildGoApiChangeMessages(apiChanges, snapshot, timeZone),
+    ];
     // Advance persistence only after every Telegram card succeeds; failed delivery
     // therefore retries the same semantic diff on the next cron invocation.
     for (const message of messages) await sendTelegram(env, message, fetchImpl);
@@ -385,15 +439,15 @@ export async function runWatch(env, { fetchImpl = fetch, now = new Date(), force
       lastChangeCount: changes.length,
     });
   } else {
-    // A deployment can alter markup inside the watched region while leaving the
-    // semantic data identical. Persist just the tiny hot state; the large baseline
-    // is rewritten only for the one-time schema upgrade.
-    if (needsSchemaUpgrade) await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
-    if (sourceStateDirty || needsSchemaUpgrade) await writeHot(env, inspected.hot);
+    // A deployment can alter representation while leaving semantic data identical.
+    // Persist the full snapshot only for schema/API-baseline migrations; otherwise
+    // the tiny hot state is enough.
+    if (needsSchemaUpgrade || needsApiBaseline) await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    if (sourceStateDirty || needsSchemaUpgrade || needsApiBaseline) await writeHot(env, inspected.hot);
     if (forceNotify) {
       const manual = buildBootMessage(snapshot, timeZone)
         .replace("OPENCODE GO WATCH · ARMED", "OPENCODE GO WATCH · MANUAL CHECK")
-        .replace("Baseline captured. Semantic monitoring is live.", "No semantic changes detected. Current pages parse cleanly.");
+        .replace("Baseline captured. Semantic monitoring is live.", "No semantic changes detected. Current sources parse cleanly.");
       await sendTelegram(env, manual, fetchImpl);
     }
     await maybeHeartbeat(env, checkedAt);
