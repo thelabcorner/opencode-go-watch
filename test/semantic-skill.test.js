@@ -20,19 +20,24 @@ test("semantic source review skill is valid and discoverable", () => {
 
 test("every configured OpenCode scrape URL is represented in the source-review map", () => {
   const configured = [...wrangler.matchAll(/^\s*(OPENCODE_[A-Z0-9_]+_URL)\s*=\s*"([^"]+)"\s*$/gm)];
-  assert.ok(configured.length >= 4, "expected the configured Go/Zen scrape URL inventory");
+  assert.ok(configured.length >= 5, "expected the configured Go/Zen scrape URL inventory, including the Go models API");
   for (const [, variable, url] of configured) {
     assert.match(sourceMap, new RegExp(variable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.ok(sourceMap.includes(url), `${variable} (${url}) must be documented in the semantic source map`);
   }
 });
 
-test("source map keeps monitored and supporting Go/Zen namespaces explicit", () => {
+test("source map keeps monitored Go/Zen namespaces explicit", () => {
+  assert.match(sourceMap, /OPENCODE_GO_MODELS_URL/);
   assert.match(sourceMap, /https:\/\/opencode\.ai\/zen\/go\/v1\/models/);
-  assert.match(sourceMap, /currently \*reviewed\*, not polled/i);
+  assert.doesNotMatch(sourceMap, /currently \*reviewed\*, not polled/i);
+  assert.match(sourceMap, /primary public availability surface for Go model IDs/i);
+  assert.match(sourceMap, /chart membership, docs membership, and API availability are separate dimensions/i);
   assert.match(sourceMap, /same model name does not imply same model ID/i);
   assert.match(sourceMap, /free.*unlimited.*different dimensions/is);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/go\/index\.tsx/);
+  assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/zen\/go\/v1\/models\.tsx/);
+  assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/zen\/util\/modelsHandler\.tsx/);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/web\/src\/content\/docs\/go\.mdx/);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/web\/src\/content\/docs\/zen\.mdx/);
 });
