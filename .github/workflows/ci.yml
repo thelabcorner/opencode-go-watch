@@ -42,6 +42,9 @@ jobs:
       - name: Validate (check + typecheck + test)
         run: npm run validate
 
+      - name: Coverage
+        run: npm run test:coverage
+
       - name: Cloudflare bundle dry run
         run: npm run cf:dry-run
 
@@ -72,6 +75,9 @@ jobs:
 
       - name: Validate (check + typecheck + test)
         run: npm run validate
+
+      - name: Coverage
+        run: npm run test:coverage
 
       - name: Deploy to homelab
         env:
