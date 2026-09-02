@@ -1,6 +1,6 @@
 # OpenCode watcher source map
 
-> Seed context, not cached truth. Re-fetch the live sources before every semantic-classifier update. This map was reviewed on 2026-08-21 and exists to tell an update agent **where to look and what each surface can establish**.
+> Seed context, not cached truth. Re-fetch the live sources before every semantic-classifier update. This map was reviewed on 2026-09-02 and exists to tell an update agent **where to look and what each surface can establish**.
 
 ## Monitored sources: derive these from `wrangler.toml` first
 
@@ -10,20 +10,11 @@ Current configuration:
 |---|---|---|
 | `OPENCODE_GO_URL` | `https://opencode.ai/go` | Go landing-page chart: curated visible chart rows, effective 5-hour request presentation, promotion markers, finite/`∞` state, limited-time/region annotations. |
 | `OPENCODE_DOCS_URL` | `https://opencode.ai/docs/go/` | Go documentation: model lists, request estimates, global dollar limits, request profiles, pricing variants, notes, endpoints/model IDs. |
+| `OPENCODE_GO_MODELS_URL` | `https://opencode.ai/zen/go/v1/models` | Go API availability truth: the full model-ID catalog advertised by the Go docs plus stable public model metadata. Volatile per-request `created` timestamps are not semantic state. |
 | `OPENCODE_ZEN_DOCS_URL` | `https://opencode.ai/docs/zen/` | Zen documentation: endpoint/model-ID table, pricing variants, free-model notes, offers/policy text, deprecations. |
 | `OPENCODE_ZEN_MODELS_URL` | `https://opencode.ai/zen/v1/models` | Zen availability truth: model IDs currently exposed by the Zen models API plus public metadata such as `owned_by`. |
 
 If these values change in `wrangler.toml`, update this reference in the same PR. A repository regression test intentionally checks that every configured OpenCode scrape URL is represented here.
-
-## Supporting source that is currently *reviewed*, not polled
-
-### Go models API
-
-`https://opencode.ai/zen/go/v1/models`
-
-The Go docs explicitly advertise this endpoint as the full list of available Go models and metadata. It is extremely useful when an unclassified Go alert involves model identity, rollout, or availability.
-
-It is **not currently one of the Worker's four configured scrape URLs**. Do not silently turn it into a fifth monitored source during a classifier hotfix; that is an architectural change with its own KV/fetch/failure-budget implications.
 
 ## Source authority by semantic dimension
 
@@ -65,9 +56,18 @@ Current upstream source path:
 
 ### Go models API
 
-Use as supporting evidence for Go API availability and model IDs. It may contain models that are not in the curated landing chart or the prose model list.
+`https://opencode.ai/zen/go/v1/models`
 
-This distinction matters: **chart membership, docs membership, and API availability are separate dimensions**.
+Use as the primary public availability surface for Go model IDs. The Go docs explicitly advertise this endpoint as the full list of available models and metadata, and the upstream route currently builds it from `ZenData.list("lite").models`.
+
+The API may contain models that are not in the curated landing chart or prose model list. This is expected source coverage, not automatically an inconsistency: **chart membership, docs membership, and API availability are separate dimensions**.
+
+The upstream models response currently stamps each item with `created: Math.floor(Date.now() / 1000)` at request time. That value is transport noise. The watcher must canonicalize the API before fingerprinting so a new timestamp alone never produces work or an alert. Stable known fields such as `id`, `object`, and `owned_by` are semantic; unfamiliar stable fields remain covered by the API residual monitor.
+
+Current upstream implementation paths:
+
+- `anomalyco/opencode:packages/console/app/src/routes/zen/go/v1/models.ts`
+- `anomalyco/opencode:packages/console/app/src/routes/zen/util/modelsHandler.ts`
 
 ### Zen models API
 
@@ -147,6 +147,8 @@ When public upstream source is available, inspect it after the live surface and 
 
 - Go chart markup/intent: `packages/console/app/src/routes/go/index.tsx`
 - Go docs content: `packages/web/src/content/docs/go.mdx`
+- Go API route: `packages/console/app/src/routes/zen/go/v1/models.ts`
+- shared models response builder: `packages/console/app/src/routes/zen/util/modelsHandler.ts`
 - Zen docs content: `packages/web/src/content/docs/zen.mdx`
 
 Use the live page/API to establish what is deployed. Use the upstream source to understand the intended structure and identify stable signals. Do not assume `dev` source has already reached production.
