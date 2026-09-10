@@ -46,7 +46,7 @@ export function validateSnapshot(snapshot) {
   if (requestCount < 10) errors.push(`docs request table found ${requestCount} models; refusing baseline update`);
   if (pricingCount < 10) errors.push(`docs pricing table found ${pricingCount} rows; refusing baseline update`);
   if (profileCount < 8) errors.push(`docs request profiles found ${profileCount} models; refusing baseline update`);
-  if (countKeys(snapshot.docs?.limits) !== 3) errors.push("docs dollar limits are incomplete");
+  if (countKeys(snapshot.docs?.limits) !== 3) errors.push("docs usage-window policy is incomplete");
 
   if (snapshot.sources?.api) {
     const apiCount = snapshot.api?.modelIds?.length ?? 0;

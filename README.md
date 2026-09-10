@@ -20,8 +20,8 @@ Go is monitored from three complementary surfaces rather than treating any singl
 ### Sources
 
 1. `https://opencode.ai/zen/go/v1/models` — **authoritative public Go availability catalog**. This is the machine-readable list of model IDs OpenCode currently advertises through the Go API namespace.
-2. `https://opencode.ai/go` — live Go request chart and promotions.
-3. `https://opencode.ai/docs/go/` — usage limits, pricing, request profiles, notes, and global subscription allowances.
+2. `https://opencode.ai/go` — live Go usage table, effective 5-hour request presentation, monthly-usage display, and promotions.
+3. `https://opencode.ai/docs/go/` — per-model monthly limits, token pricing, estimated request windows, request profiles, and notes.
 
 The API catalog and docs are intentionally **not required to contain identical model sets**. OpenCode can expose a model through the Go API before the human-facing docs or economic tables are updated. The watcher therefore treats an API-only model as a real availability state, not as a parser failure or automatic docs mismatch.
 
@@ -35,7 +35,7 @@ The Go models API also emits a fresh `created` timestamp on every response. The 
 | **API availability** | model added / removed from `/zen/go/v1/models` | dedicated Go API model availability card |
 | **API metadata** | stable advertised API metadata changes | dedicated Go API metadata card |
 | Request limits | 5-hour / weekly / monthly estimate changed | grouped per-model percentage deltas |
-| Subscription allowance | 5-hour / weekly / monthly dollar allowance changed | grouped allowance card |
+| Usage-window policy | 5-hour / weekly / monthly allowance relationship changed | grouped policy card |
 | Request profile | input/cached/output request assumptions changed | request-profile card |
 | Pricing | pricing row or field added / removed / changed | exact row + dollar/percentage delta |
 | Go chart | chart model added / removed / request count changed | chart card |

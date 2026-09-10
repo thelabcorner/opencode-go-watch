@@ -6,10 +6,15 @@ const UNLIMITED = /^(?:∞|infinity|unlimited)$/i;
 const EMPTY_LIMIT = /^(?:-|—|–)$/;
 const PROFILE_RE = /^([^\n]+?)\s*[—–-]\s*([\d,]+)\s+input,\s*([\d,]+)\s+cached,\s*([\d,]+)\s+output\s+tokens\s+per\s+request\s*$/gim;
 const ITEM_START_RE = /<span\b[^>]*\bdata-item(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>/gi;
+const MODEL_ROW_START_RE = /<div\b(?=[^>]*\bdata-slot\s*=\s*(?:"model-row"|'model-row'|model-row))[^>]*>/gi;
 const VALUE_RE = /<span\b[^>]*\bdata-value(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>/i;
 const NAME_RE = /<span\b[^>]*\bdata-name(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>/i;
 const BONUS_RE = /<span\b[^>]*\bdata-bonus(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>/i;
-const GRAPH_MARKER_RE = /\bdata-component\s*=\s*["']limit-graph["']/i;
+const MODEL_CELL_RE = /<div\b(?=[^>]*\bdata-slot\s*=\s*(?:"model"|'model'|model))[^>]*>([\s\S]*?)<\/div>/i;
+const REQUESTS_CELL_RE = /<div\b(?=[^>]*\bdata-slot\s*=\s*(?:"requests"|'requests'|requests))[^>]*>([\s\S]*?)<\/div>/i;
+const BDI_RE = /<bdi\b[^>]*>([\s\S]*?)<\/bdi>/gi;
+const BADGE_RE = /<span\b(?=[^>]*\bdata-slot\s*=\s*(?:"badge"|'badge'|badge))[^>]*>([\s\S]*?)<\/span>/gi;
+const GRAPH_MARKER_RE = /\bdata-component\s*=\s*["'](?:limit-graph|go-usage)["']/i;
 const PROMO_TEXT_RE = /usage\s+limits?/i;
 const LIMITED_TIME_RE = /limited\s+time/i;
 const MAX_PROMO_PREFIX = 96_000;
@@ -50,10 +55,11 @@ function findTable(tables, requiredHeaders) {
   for (const rows of tables) {
     const headers = rows[0] ?? [];
     let matched = true;
-    for (const needle of requiredHeaders) {
+    for (const requirement of requiredHeaders) {
+      const needles = Array.isArray(requirement) ? requirement : [requirement];
       let found = false;
       for (const header of headers) {
-        if (canonicalHeader(header).includes(needle)) {
+        if (needles.some((needle) => canonicalHeader(header).includes(canonicalHeader(needle)))) {
           found = true;
           break;
         }
@@ -68,14 +74,30 @@ function findTable(tables, requiredHeaders) {
   return undefined;
 }
 
+function headerIndex(headers, aliases) {
+  const needles = (Array.isArray(aliases) ? aliases : [aliases]).map(canonicalHeader);
+  const canonical = headers.map(canonicalHeader);
+  for (const needle of needles) {
+    const exact = canonical.indexOf(needle);
+    if (exact >= 0) return exact;
+  }
+  return canonical.findIndex((header) => needles.some((needle) => header.includes(needle)));
+}
+
 function rowsToRequestMap(rows) {
   const out = {};
+  const headers = rows[0] ?? [];
+  const model = headerIndex(headers, "model");
+  const fiveHour = headerIndex(headers, "requests per 5 hour");
+  const weekly = headerIndex(headers, "requests per week");
+  const monthly = headerIndex(headers, "requests per month");
+  if ([model, fiveHour, weekly, monthly].some((index) => index < 0)) return out;
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    if (row.length < 4 || !row[0]) continue;
-    const five = parseRequestLimit(row[1]);
-    const week = parseRequestLimit(row[2]);
-    const month = parseRequestLimit(row[3]);
+    if (!row[model]) continue;
+    const five = parseRequestLimit(row[fiveHour]);
+    const week = parseRequestLimit(row[weekly]);
+    const month = parseRequestLimit(row[monthly]);
     const explicitUnlimited = five.unlimited || week.unlimited || month.unlimited;
     // OpenCode currently represents Go models that sit outside the dollar quota as
     // ∞ on the landing chart but '-' across all request-count cells in the docs.
@@ -83,33 +105,65 @@ function rowsToRequestMap(rows) {
     // an all-empty row; this does NOT imply absence of a separate free-model rate limit.
     const quotaExempt = explicitUnlimited || (five.empty && week.empty && month.empty);
     if (quotaExempt) {
-      out[row[0]] = { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true };
+      out[row[model]] = { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true };
       continue;
     }
     if (five.value == null || week.value == null || month.value == null) continue;
-    out[row[0]] = { requests5h: five.value, requestsWeek: week.value, requestsMonth: month.value, unlimited: false };
+    out[row[model]] = { requests5h: five.value, requestsWeek: week.value, requestsMonth: month.value, unlimited: false };
   }
   return out;
 }
 
 function rowsToPricingMap(rows) {
   const out = {};
+  const headers = rows[0] ?? [];
+  const model = headerIndex(headers, "model");
+  const input = headerIndex(headers, "input");
+  const output = headerIndex(headers, "output");
+  const cachedRead = headerIndex(headers, "cached read");
+  const cachedWrite = headerIndex(headers, "cached write");
+  const usage = headerIndex(headers, ["usage", "monthly limit", "monthly usage", "included usage"]);
+  if ([model, input, output, cachedRead, usage].some((index) => index < 0)) return out;
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    if (row.length < 6 || !row[0]) continue;
-    out[row[0]] = {
-      inputPerM: parseMoney(row[1]),
-      outputPerM: parseMoney(row[2]),
-      cachedReadPerM: parseMoney(row[3]),
-      cachedWritePerM: parseMoney(row[4]),
-      usageUsd: parseMoney(row[5]),
+    if (!row[model]) continue;
+    out[row[model]] = {
+      inputPerM: parseMoney(row[input]),
+      outputPerM: parseMoney(row[output]),
+      cachedReadPerM: parseMoney(row[cachedRead]),
+      cachedWritePerM: cachedWrite < 0 ? null : parseMoney(row[cachedWrite]),
+      usageUsd: parseMoney(row[usage]),
     };
   }
   return out;
 }
 
 function parseLimits(sectionText) {
-  const fiveHour = /5\s*hour\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
+  // Current docs define window limits as percentages of each model's monthly limit.
+  // Normalize that policy onto a $60 monthly reference so the existing snapshot
+  // fields stay compatible with historical {12,30,60} baselines without depending
+  // on the docs retaining a particular dollar example.
+  const fiveHourPercent = /5\s*[-–—]?\s*hour\s*[—–-]\s*([\d.]+)\s*%/i.exec(sectionText);
+  const weeklyPercent = /\bweekly\s*[—–-]\s*([\d.]+)\s*%/i.exec(sectionText);
+  const monthlyPercent = /\bmonthly\s*[—–-]\s*([\d.]+)\s*%/i.exec(sectionText);
+  if (fiveHourPercent && weeklyPercent && monthlyPercent) {
+    const five = Number(fiveHourPercent[1]);
+    const week = Number(weeklyPercent[1]);
+    const month = Number(monthlyPercent[1]);
+    if (Number.isFinite(five) && Number.isFinite(week) && Number.isFinite(month) && month > 0) {
+      const referenceMonthlyUsd = 60;
+      const normalized = (percent) => Number((referenceMonthlyUsd * percent / month).toFixed(6));
+      return {
+        fiveHourUsd: normalized(five),
+        weeklyUsd: normalized(week),
+        monthlyUsd: referenceMonthlyUsd,
+      };
+    }
+  }
+
+  // Historical docs exposed explicit dollar values. Keep this fallback so archived
+  // fixtures and older source representations remain parseable.
+  const fiveHour = /5\s*[-–—]?\s*hour\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
   const weekly = /weekly\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
   const monthly = /monthly\s*limit\s*[—–-]\s*\$([\d.]+)/i.exec(sectionText);
   const out = {};
@@ -220,8 +274,8 @@ function graphSlice(source) {
   return { chartHtml: source.slice(start, close + 9), chartStart: start };
 }
 
-function balancedSpanEnd(source, start) {
-  const re = /<\/?span\b[^>]*>/gi;
+function balancedElementEnd(source, start, tagName) {
+  const re = new RegExp(`<\\/?${tagName}\\b[^>]*>`, "gi");
   re.lastIndex = start;
   let depth = 0;
   let match;
@@ -233,17 +287,24 @@ function balancedSpanEnd(source, start) {
   return -1;
 }
 
+function monitoredRanges(chartHtml) {
+  const starts = [];
+  ITEM_START_RE.lastIndex = 0;
+  MODEL_ROW_START_RE.lastIndex = 0;
+  let match;
+  while ((match = ITEM_START_RE.exec(chartHtml)) !== null) starts.push({ index: match.index, tagName: "span" });
+  while ((match = MODEL_ROW_START_RE.exec(chartHtml)) !== null) starts.push({ index: match.index, tagName: "div" });
+  starts.sort((a, b) => a.index - b.index);
+  return starts
+    .map(({ index, tagName }) => [index, balancedElementEnd(chartHtml, index, tagName)])
+    .filter(([, end]) => end >= 0);
+}
+
 function buildGoMonitorStructure(chartHtml) {
   const items = [];
-  const ranges = [];
-  ITEM_START_RE.lastIndex = 0;
-  let match;
-  while ((match = ITEM_START_RE.exec(chartHtml)) !== null) {
-    const end = balancedSpanEnd(chartHtml, match.index);
-    if (end < 0) continue;
-    ranges.push([match.index, end]);
-    items.push(canonicalMonitoredHtml(chartHtml.slice(match.index, end), { dropSvg: true, includeText: true }));
-    ITEM_START_RE.lastIndex = end;
+  const ranges = monitoredRanges(chartHtml);
+  for (const [start, end] of ranges) {
+    items.push(canonicalMonitoredHtml(chartHtml.slice(start, end), { dropSvg: true, includeText: true }));
   }
 
   // Model ordering on the graph is presentation, not semantics. Sort canonical
@@ -284,6 +345,48 @@ export function prepareGoPage(html) {
 
 export function parsePreparedGoPage(prepared) {
   const chart = {};
+
+  // Current Go markup uses an ARIA table with model-row/data-slot semantics rather
+  // than the historical limit-graph span pills. Parse by stable semantic slots and
+  // keep the old representation below for snapshot/history compatibility.
+  const modelRows = [];
+  MODEL_ROW_START_RE.lastIndex = 0;
+  let modelRowStart;
+  while ((modelRowStart = MODEL_ROW_START_RE.exec(prepared.chartHtml)) !== null) {
+    modelRows.push({ index: modelRowStart.index, tag: modelRowStart[0] });
+  }
+  for (let i = 0; i < modelRows.length; i++) {
+    const segment = prepared.chartHtml.slice(modelRows[i].index, i + 1 < modelRows.length ? modelRows[i + 1].index : prepared.chartHtml.length);
+    const modelCell = MODEL_CELL_RE.exec(segment)?.[1] ?? "";
+    BDI_RE.lastIndex = 0;
+    const nameMatch = BDI_RE.exec(modelCell);
+    const name = nameMatch ? normalizeSpace(textContent(nameMatch[1])) : "";
+
+    const requestsCell = REQUESTS_CELL_RE.exec(segment)?.[1] ?? "";
+    BDI_RE.lastIndex = 0;
+    let requests5h = null;
+    let requestValue;
+    while ((requestValue = BDI_RE.exec(requestsCell)) !== null) {
+      const parsed = parseInteger(textContent(requestValue[1]));
+      if (parsed != null) requests5h = parsed;
+    }
+    const explicitInfinite = /\bdata-infinite(?:\s|=|>)/i.test(modelRows[i].tag)
+      || UNLIMITED.test(compactScalar(textContent(requestsCell)));
+
+    let bonus = null;
+    BADGE_RE.lastIndex = 0;
+    let badge;
+    while ((badge = BADGE_RE.exec(modelCell)) !== null) {
+      const multiplier = parseBonusMultiplier(textContent(badge[1]));
+      if (multiplier != null) {
+        bonus = `${multiplier}x usage`;
+        break;
+      }
+    }
+    if (name && (explicitInfinite || requests5h != null)) {
+      chart[name] = { requests5h: explicitInfinite ? null : requests5h, bonus, unlimited: explicitInfinite };
+    }
+  }
 
   // Segment by each outer data-item rather than assuming data-value/data-name are
   // adjacent siblings. Solid SSR may interleave hydration markers/comments.
@@ -338,7 +441,10 @@ export function parseGoPage(html) {
 
 function extractUsageNotes(usageText) {
   const notes = {};
-  const peak = /DeepSeek[^.\n]*Peak hours[^.\n]*\.?/i.exec(usageText);
+  // Do not use '.' as a sentence boundary before "Peak hours": model families can
+  // contain dotted versions such as DeepSeek V4.1 Flash. Paragraph/newline scope is
+  // the stable boundary in the rendered docs.
+  const peak = /\bDeepSeek\b[^\n]{0,600}?\bPeak hours?\b[^\n]*/i.exec(usageText);
   if (peak) notes.deepSeekPeakHours = normalizeSpace(peak[0]);
   const mutable = /Usage limits may change[^.\n]*\.?/i.exec(usageText);
   if (mutable) notes.limitsDisclaimer = normalizeSpace(mutable[0]);
@@ -358,7 +464,7 @@ export function parsePreparedDocsPage(prepared) {
   const usageText = textContent(prepared.usageHtml);
   const tables = extractHtmlTables(prepared.usageHtml);
   const requestTable = findTable(tables, ["model", "requests per 5 hour", "requests per week", "requests per month"]);
-  const pricingTable = findTable(tables, ["model", "input", "output", "cached read", "usage"]);
+  const pricingTable = findTable(tables, ["model", "input", "output", "cached read", ["usage", "monthly limit", "monthly usage", "included usage"]]);
 
   if (!requestTable) throw new Error("Docs parser could not find request-count table");
   if (!pricingTable) throw new Error("Docs parser could not find pricing table");

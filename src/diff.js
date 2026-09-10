@@ -26,9 +26,10 @@ const DOCS_CHANGE_TYPES = new Set([
 
 const WRAPPED_REGION_RE = /<span\b(?=[^>]*\bdata-regions\b)[^>]*>\s*\(\s*<a\b(?=[^>]*\bhref="([^"]+)")[^>]*>\s*limited\s+regions\s*<\/a>\s*\)\s*<\/span>/gi;
 const DIRECT_REGION_RE = /<a\b(?=[^>]*\bdata-regions\b)(?=[^>]*\bhref="([^"]+)")[^>]*>\s*\(?\s*limited\s+regions\s*\)?\s*<\/a>/gi;
-const MONITOR_ITEM_RE = /<span\b(?=[^>]*\bdata-item\b)[^>]*>/gi;
+const MONITOR_ITEM_RE = /<(?:span|div)\b(?=[^>]*\bdata-model="[^"]+")[^>]*>/gi;
 const DATA_MODEL_RE = /\bdata-model="([^"]+)"/i;
 const DATA_NAME_RE = /<span\b[^>]*\bdata-name(?:="[^"]*")?[^>]*>([\s\S]*?)<\/span>/i;
+const BDI_RE = /<bdi\b[^>]*>([\s\S]*?)<\/bdi>/i;
 
 function same(a, b) { return Object.is(a, b); }
 
@@ -94,7 +95,7 @@ function chartModelIdsFromMonitor(structure) {
     if (!modelId) continue;
     const end = i + 1 < starts.length ? starts[i + 1].index : source.length;
     const segment = source.slice(current.index, end);
-    const name = decodeMonitorText(DATA_NAME_RE.exec(segment)?.[1]);
+    const name = decodeMonitorText(DATA_NAME_RE.exec(segment)?.[1] ?? BDI_RE.exec(segment)?.[1]);
     if (name) ids[name] = modelId;
   }
   return ids;

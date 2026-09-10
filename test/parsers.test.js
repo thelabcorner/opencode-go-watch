@@ -19,6 +19,41 @@ test("parses Go chart and promotion", () => {
   assert.equal(go.promoBanner, "Hy3 gets 8× usage limits for a limited time");
 });
 
+test("parses current go-usage table rows and row-scoped promotion badges", () => {
+  const go = parseGoPage(`
+    <figure data-component="go-usage">
+      <div role="table">
+        <div role="rowgroup" data-slot="rows">
+          <div role="row" data-slot="model-row" data-model="glm-5.3-flash">
+            <div role="rowheader" data-slot="model"><bdi>GLM-5.3-Flash</bdi></div>
+            <div role="cell" data-slot="usage-value"><div data-slot="requests"><bdi>6,320</bdi></div></div>
+            <div role="cell" data-slot="allowance"><bdi>$60</bdi></div>
+          </div>
+          <div role="row" data-slot="model-row" data-model="deepseek-flash">
+            <div role="rowheader" data-slot="model"><bdi>DeepSeek V4.1 Flash</bdi><span data-slot="badge">New</span><span data-slot="badge">4× usage</span></div>
+            <div role="cell" data-slot="usage-value"><div data-slot="requests"><s>6,500</s> <bdi>26,000</bdi></div></div>
+            <div role="cell" data-slot="allowance"><s>$15</s> <bdi>$60</bdi></div>
+          </div>
+        </div>
+      </div>
+    </figure>`);
+  assert.deepEqual(go.chart["GLM-5.3-Flash"], { requests5h: 6320, bonus: null, unlimited: false });
+  assert.deepEqual(go.chart["DeepSeek V4.1 Flash"], { requests5h: 26000, bonus: "4x usage", unlimited: false });
+  assert.match(go.monitorStructure, /data-model="glm-5\.3-flash"/);
+  assert.match(go.monitorStructure, /data-model="deepseek-flash"/);
+});
+
+test("current go-usage parser generalizes to an unrelated sibling model", () => {
+  const go = parseGoPage(`
+    <figure data-component="go-usage">
+      <div role="row" data-slot="model-row" data-model="future-model">
+        <div role="rowheader" data-slot="model"><bdi>Future Model</bdi><span data-slot="badge">3x usage</span></div>
+        <div role="cell" data-slot="usage-value"><div data-slot="requests"><bdi>9,999</bdi></div></div>
+      </div>
+    </figure>`);
+  assert.deepEqual(go.chart["Future Model"], { requests5h: 9999, bonus: "3x usage", unlimited: false });
+});
+
 test("parses docs limits, request table, expanded profiles and pricing", () => {
   const docs = parseDocsPage(docsHtml);
   assert.deepEqual(docs.limits, { fiveHourUsd: 12, weeklyUsd: 30, monthlyUsd: 60 });
@@ -31,6 +66,26 @@ test("parses docs limits, request table, expanded profiles and pricing", () => {
   assert.equal(docs.profiles["Kimi K2.6"].cachedTokens, 55000);
   assert.equal(docs.pricing["GPT 5.6 Luna (≤ 272K tokens)"].cachedWritePerM, 0.25);
   assert.equal(docs.pricing["Grok 4.5"].cachedWritePerM, null);
+});
+
+test("accepts current Monthly limit pricing and resolves columns by header meaning", () => {
+  const docs = parseDocsPage(`
+    <h2>Usage limits</h2>
+    <p>Each model has the following usage limits: 5-hour — 20% of the monthly limit; weekly — 50%; and monthly — 100%.</p>
+    <p>For example, if a model has a $100 monthly limit: 5-hour limit — $20; Weekly limit — $50; Monthly limit — $100.</p>
+    <table><tr><th>requests per month</th><th>Model</th><th>requests per 5 hour</th><th>requests per week</th></tr>
+      <tr><td>400</td><td>Example Model</td><td>100</td><td>200</td></tr>
+    </table>
+    <p><strong>DeepSeek V4.1 Flash / V4 Pro:</strong> Peak hours are 01:00-04:00 and 06:00-10:00 UTC, Monday through Friday; all other hours are Off-Peak.</p>
+    <p>Example Model — 100 input, 200 cached, 300 output tokens per request</p>
+    <table><tr><th>Model</th><th>Monthly limit</th><th>Cached Write</th><th>Output</th><th>Cached Read</th><th>Input</th></tr>
+      <tr><td>Example Model</td><td>$60</td><td>-</td><td>$2</td><td>$0.10</td><td>$1</td></tr>
+    </table>`);
+  assert.deepEqual(docs.requests["Example Model"], { requests5h: 100, requestsWeek: 200, requestsMonth: 400, unlimited: false });
+  assert.deepEqual(docs.pricing["Example Model"], { inputPerM: 1, outputPerM: 2, cachedReadPerM: 0.1, cachedWritePerM: null, usageUsd: 60 });
+  assert.deepEqual(docs.limits, { fiveHourUsd: 12, weeklyUsd: 30, monthlyUsd: 60 });
+  assert.match(docs.notes.deepSeekPeakHours, /DeepSeek V4\.1 Flash/);
+  assert.match(docs.notes.deepSeekPeakHours, /Peak hours are 01:00-04:00/);
 });
 
 test("parses infinite Go chart entries and dash-only docs rows as quota-exempt", () => {
@@ -121,4 +176,12 @@ test("presentation-only chart markup and item reordering are silent in the fallb
   const insertAt = rebuilt.findIndex((line) => line.includes('<div data-slot="pills">')) + 1;
   rebuilt.splice(insertAt, 0, ...itemLines.reverse());
   assert.equal(parseGoPage(rebuilt.join("\n")).monitorStructure, before.monitorStructure);
+});
+
+test("presentation-only current go-usage row markup remains silent", () => {
+  const html = `<figure data-component="go-usage"><div role="row" data-slot="model-row" data-model="example"><div data-slot="model"><bdi>Example</bdi></div><div data-slot="usage-value"><div data-slot="requests"><bdi>1,234</bdi></div></div></div></figure>`;
+  const noisy = html
+    .replace('data-component="go-usage"', 'class="layout-v2" data-component="go-usage"')
+    .replace('role="row"', 'role="row" class="animated" style="opacity: 1"');
+  assert.equal(parseGoPage(noisy).monitorStructure, parseGoPage(html).monitorStructure);
 });
