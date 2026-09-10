@@ -177,6 +177,14 @@ test("health is public but limited to operational state", async () => {
   assert.deepEqual(Object.keys(data).sort(), ["configured", "error", "meta", "ok"]);
 });
 
+test("liveness stays healthy even when semantic watcher state is degraded", async () => {
+  const e = env();
+  await e.STATE.put("error:v1", JSON.stringify({ message: "persisted parser failure" }));
+  const response = await worker.fetch(new Request("https://worker.example/live"), e);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+});
+
 test("baseline reset requires auth and clears stored baseline", async () => {
   const e = env();
   await e.STATE.put("snapshot:v1", JSON.stringify({ any: "baseline" }));

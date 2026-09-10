@@ -194,6 +194,11 @@ export default {
       const [status, history, goCalibration] = await Promise.all([getZenStatus(env), readAlertHistory(env, 96), readSnapshot(env)]);
       return new Response(decorateZenDashboard(zenDashboard(status, history), status.snapshot, goCalibration), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS } });
     }
+    // Process liveness is intentionally independent of persisted watcher state.
+    // `/health` and `/zen/health` remain semantic/readiness surfaces and can return
+    // 503 during a scrape outage; Docker must still be able to start the scheduler
+    // that performs the recovery check.
+    if (request.method === "GET" && url.pathname === "/live") return json({ ok: true });
     if (request.method === "GET" && url.pathname === "/health") {
       const status = await getStatus(env); return json({ ok: status.ok, configured: status.configured, meta: status.meta, error: status.error }, status.ok ? 200 : 503);
     }

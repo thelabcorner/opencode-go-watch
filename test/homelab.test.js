@@ -12,6 +12,12 @@ test("homelab scheduler invokes both Go and Zen watcher namespaces", () => {
   assert.match(compose, /wrangler dev does not fire the Worker's scheduled\(\) handler/);
 });
 
+test("Docker liveness cannot deadlock semantic recovery", () => {
+  assert.match(compose, /healthcheck:[\s\S]*http:\/\/127\.0\.0\.1:8787\/live/);
+  assert.doesNotMatch(compose, /healthcheck:[\s\S]*http:\/\/127\.0\.0\.1:8787\/health/);
+  assert.match(compose, /condition:\s*service_healthy/);
+});
+
 test("homelab deployment fails closed when the Zen baseline stays empty", () => {
   assert.match(workflow, /runs-on: \[self-hosted, homelab\]/);
   assert.match(workflow, /docker compose -f .*compose\.yml.* up -d --build/);
