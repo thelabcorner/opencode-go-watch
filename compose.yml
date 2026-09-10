@@ -15,7 +15,11 @@ services:
     volumes:
       - watch-kv:/app/.wrangler/state   # KV (STATE binding) persistence
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
+      # Docker health is process liveness, not watcher semantic health. `/health`
+      # deliberately returns 503 while a persisted scrape failure exists; using it
+      # here deadlocks recovery because the cron sidecar waits for service_healthy
+      # before it can run the check that clears that persisted error.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/live"]
       interval: 5s
       timeout: 5s
       retries: 12
