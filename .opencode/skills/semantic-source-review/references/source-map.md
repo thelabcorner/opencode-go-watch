@@ -1,6 +1,6 @@
 # OpenCode watcher source map
 
-> Seed context, not cached truth. Re-fetch the live sources before every semantic-classifier update. This map was reviewed on 2026-09-02 and exists to tell an update agent **where to look and what each surface can establish**.
+> Seed context, not cached truth. Re-fetch the live sources before every semantic-classifier update. This map was reviewed on 2026-09-10 and exists to tell an update agent **where to look and what each surface can establish**.
 
 ## Monitored sources: derive these from `wrangler.toml` first
 
@@ -8,8 +8,8 @@ Current configuration:
 
 | Config variable | Current URL | Role in this watcher |
 |---|---|---|
-| `OPENCODE_GO_URL` | `https://opencode.ai/go` | Go landing-page chart: curated visible chart rows, effective 5-hour request presentation, promotion markers, finite/`∞` state, limited-time/region annotations. |
-| `OPENCODE_DOCS_URL` | `https://opencode.ai/docs/go/` | Go documentation: model lists, request estimates, global dollar limits, request profiles, pricing variants, notes, endpoints/model IDs. |
+| `OPENCODE_GO_URL` | `https://opencode.ai/go` | Go landing-page usage table: curated visible rows, effective 5-hour request presentation, monthly-usage display, promotion markers, finite/`∞` state, limited-time/region annotations. |
+| `OPENCODE_DOCS_URL` | `https://opencode.ai/docs/go/` | Go documentation: model lists, request estimates, per-model monthly limits, request profiles, pricing variants, notes, endpoints/model IDs. |
 | `OPENCODE_GO_MODELS_URL` | `https://opencode.ai/zen/go/v1/models` | Go API availability truth: the full model-ID catalog advertised by the Go docs plus stable public model metadata. Volatile per-request `created` timestamps are not semantic state. |
 | `OPENCODE_ZEN_DOCS_URL` | `https://opencode.ai/docs/zen/` | Zen documentation: endpoint/model-ID table, pricing variants, free-model notes, offers/policy text, deprecations. |
 | `OPENCODE_ZEN_MODELS_URL` | `https://opencode.ai/zen/v1/models` | Zen availability truth: model IDs currently exposed by the Zen models API plus public metadata such as `owned_by`. |
@@ -31,11 +31,15 @@ Use for what the chart actually claims:
 
 The landing page is a curated visualization, **not a complete Go availability catalog**. A model missing from the chart is not automatically removed from Go.
 
-Current upstream implementation path:
+Current upstream implementation paths:
 
-`anomalyco/opencode:packages/console/app/src/routes/go/index.tsx`
+- `anomalyco/opencode:packages/console/app/src/routes/go/index.tsx`
+- `anomalyco/opencode:packages/console/app/src/component/limits-graph.tsx`
+- `anomalyco/opencode:packages/console/app/src/component/go-models.ts`
 
-Review this file when rendered HTML changes shape. It often reveals intent more reliably than reverse-engineering SSR markup from a tiny residual delta.
+As of 2026-09-10, the rendered semantic container is `data-component="go-usage"` and model rows use `data-slot="model-row"`, with the current request value under `data-slot="requests"`. Historical `limit-graph` / `data-item` markup remains a supported parser representation for baseline compatibility.
+
+Review these files when rendered HTML changes shape. They often reveal intent more reliably than reverse-engineering SSR markup from a tiny residual delta.
 
 ### Go docs
 
@@ -43,10 +47,10 @@ Use for documented Go economics and API routing:
 
 - the current documented model list;
 - 5-hour / weekly / monthly request estimates;
-- `$12 / $30 / $60` global allowance text when current;
+- the documented 5-hour / weekly / monthly allowance relationship and example dollar amounts;
 - observed request-profile assumptions;
 - pricing rows and threshold/peak variants;
-- usage-included amounts;
+- per-model monthly limits / included usage (currently the `Monthly limit` pricing column);
 - endpoint, Model ID, and SDK tables;
 - usage notes and policy wording.
 
@@ -145,7 +149,7 @@ When investigating an unclassified model event, ask separately:
 
 When public upstream source is available, inspect it after the live surface and before writing a classifier:
 
-- Go chart markup/intent: `packages/console/app/src/routes/go/index.tsx`
+- Go landing markup/intent: `packages/console/app/src/routes/go/index.tsx`, `packages/console/app/src/component/limits-graph.tsx`, and `packages/console/app/src/component/go-models.ts`
 - Go docs content: `packages/web/src/content/docs/go.mdx`
 - Go API route: `packages/console/app/src/routes/zen/go/v1/models.ts`
 - shared models response builder: `packages/console/app/src/routes/zen/util/modelsHandler.ts`

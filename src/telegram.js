@@ -242,7 +242,7 @@ function renderBlocks(changes, snapshot) {
   }
 
   const global = changes.map((change, index) => ({ ...change, __index: index })).filter((item) => item.type === "global_limit_changed" && !consumed.has(item.__index));
-  if (global.length) { global.forEach((item) => consumed.add(item.__index)); blocks.push(`💳 <b>SUBSCRIPTION ALLOWANCE CHANGED</b>\n${global.map((item) => `${labelField(item.field)}: <code>${fmtMoney(item.before)} → ${fmtMoney(item.after)}</code> ${direction(item.before, item.after)} ${fmtPercent(item.percent)}`.trim()).join("\n")}\n<i>Window-specific V2 capacity is recalculated from the new Go dollar allowance.</i>`); }
+  if (global.length) { global.forEach((item) => consumed.add(item.__index)); blocks.push(`💳 <b>USAGE WINDOW POLICY CHANGED</b>\n${global.map((item) => `${labelField(item.field)}: <code>${fmtMoney(item.before)} → ${fmtMoney(item.after)}</code> ${direction(item.before, item.after)} ${fmtPercent(item.percent)}`.trim()).join("\n")}\n<i>Values use the normalized $60 monthly reference; each model's actual monthly limit remains in its pricing row.</i>`); }
 
   changes.forEach((change, index) => {
     if (consumed.has(index)) return;
@@ -311,7 +311,7 @@ export function buildBootMessage(snapshot, timeZone = "America/Chicago") {
   return [
     "🟢 <b>OPENCODE GO WATCH · ARMED</b>", "━━━━━━━━━━━━━━━━━━━━", "Baseline captured. Semantic monitoring is live.", "",
     `📚 <b>${modelCount}</b> usage-table models  ·  📈 <b>${chartCount}</b> chart models`,
-    `<pre>5 hour  ${fmtMoney(limits.fiveHourUsd)}\nweek    ${fmtMoney(limits.weeklyUsd)}\nmonth   ${fmtMoney(limits.monthlyUsd)}</pre>`,
+    `<b>Window policy · $60 monthly reference</b>\n<pre>5 hour  ${fmtMoney(limits.fiveHourUsd)}\nweek    ${fmtMoney(limits.weeklyUsd)}\nmonth   ${fmtMoney(limits.monthlyUsd)}</pre>`,
     best ? `💸 <b>Best paid Usage Value</b>  ${escapeHtml(best.name)} · ~${fmtYield(best.goCapacity?.monthlyEquivalentRequests)} standardized requests / monthly Go allowance` : "",
     ranking.calibration?.stats?.uniqueWorkloads ? `📐 V2 calibration: <b>${ranking.calibration.stats.uniqueWorkloads}</b> unique OpenCode request shapes` : "",
     unlimited.length ? `♾️ <b>${unlimited.length}</b> Go quota-exempt model${unlimited.length === 1 ? "" : "s"}: ${unlimited.map(([name]) => escapeHtml(name)).join(" · ")}` : "",

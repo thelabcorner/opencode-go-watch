@@ -51,6 +51,30 @@ function env() {
   };
 }
 
+const currentGoHtml = `<!doctype html><html><body><figure data-component="go-usage"><div role="table"><div role="rowgroup" data-slot="rows">
+  <div role="row" data-slot="model-row" data-model="kimi-k3"><div data-slot="model"><bdi>Kimi K3</bdi></div><div data-slot="usage-value"><div data-slot="requests"><bdi>110</bdi></div></div></div>
+  <div role="row" data-slot="model-row" data-model="gpt-5.6-luna"><div data-slot="model"><bdi>GPT 5.6 Luna</bdi></div><div data-slot="usage-value"><div data-slot="requests"><bdi>2,050</bdi></div></div></div>
+  <div role="row" data-slot="model-row" data-model="glm-5.3"><div data-slot="model"><bdi>GLM-5.3</bdi></div><div data-slot="usage-value"><div data-slot="requests"><bdi>220</bdi></div></div></div>
+  <div role="row" data-slot="model-row" data-model="glm-5.2"><div data-slot="model"><bdi>GLM-5.2</bdi></div><div data-slot="usage-value"><div data-slot="requests"><bdi>880</bdi></div></div></div>
+  <div role="row" data-slot="model-row" data-model="deepseek-v4-flash"><div data-slot="model"><bdi>DeepSeek V4 Flash</bdi></div><div data-slot="usage-value"><div data-slot="requests"><bdi>7,600</bdi></div></div></div>
+</div></div></figure></body></html>`;
+
+const currentDocsHtml = docsHtml.replace("<th>Usage</th>", "<th>Monthly limit</th>");
+
+test("current Sep 2026 Go and docs source shapes bootstrap cleanly", async () => {
+  const e = env();
+  const telegram = [];
+  const result = await runWatch(e, {
+    fetchImpl: makeFetch({ go: currentGoHtml, docs: currentDocsHtml, telegram }),
+    now: new Date("2026-09-10T16:00:00Z"),
+  });
+  assert.equal(result.status, "bootstrapped");
+  assert.equal(result.snapshot.go.chart["GPT 5.6 Luna"].requests5h, 2050);
+  assert.equal(result.snapshot.docs.pricing["Grok 4.5"].usageUsd, 15);
+  assert.equal(telegram.length, 1);
+  assert.match(telegram[0].text, /WATCH · ARMED/);
+});
+
 test("first run captures baseline and sends one armed message", async () => {
   const e = env();
   const telegram = [];

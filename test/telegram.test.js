@@ -129,6 +129,7 @@ test("boot message is compact and reports promotion cross-check", () => {
     go: { chart: { A: { requests5h: 200, bonus: "2x usage" } }, promoBanner: "A gets 2× usage limits for a limited time" },
   });
   assert.match(msg, /WATCH · ARMED/);
+  assert.match(msg, /Window policy · \$60 monthly reference/);
   assert.match(msg, /A 2x/);
   assert.ok(msg.length < 1200);
 });

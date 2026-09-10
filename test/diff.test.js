@@ -47,6 +47,42 @@ test("classifies a stable Go model's data-model ID replacement semantically", ()
   assert.equal(changes.some((change) => change.type === "unclassified_source_change"), false);
 });
 
+test("classifies data-model replacements in current go-usage row markup", () => {
+  const page = (id) => `<figure data-component="go-usage">
+    <div role="row" data-slot="model-row" data-model="${id}">
+      <div role="rowheader" data-slot="model"><bdi>Example Model</bdi></div>
+      <div role="cell" data-slot="usage-value"><div data-slot="requests"><bdi>1,234</bdi></div></div>
+    </div>
+  </figure>`;
+  const base = snap();
+  const before = { ...base, go: parseGoPage(page("example-v1")) };
+  const after = { ...base, go: parseGoPage(page("example-v2")), checkedAt: "2026-09-10T16:00:00.000Z" };
+  assert.deepEqual(diffSnapshots(before, after), [{
+    type: "chart_changed",
+    key: "Example Model",
+    field: "modelId",
+    before: "example-v1",
+    after: "example-v2",
+  }]);
+});
+
+test("unknown semantic attributes in current go-usage rows still hit the residual fallback", () => {
+  const page = (extra = "") => `<figure data-component="go-usage">
+    <div role="row" data-slot="model-row" data-model="example" ${extra}>
+      <div role="rowheader" data-slot="model"><bdi>Example Model</bdi></div>
+      <div role="cell" data-slot="usage-value"><div data-slot="requests"><bdi>1,234</bdi></div></div>
+    </div>
+  </figure>`;
+  const base = snap();
+  const before = { ...base, go: parseGoPage(page()) };
+  const after = { ...base, go: parseGoPage(page('data-context-window="1m"')) };
+  const changes = diffSnapshots(before, after);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].type, "unclassified_source_change");
+  assert.equal(changes[0].source, "go");
+  assert.match(changes[0].after, /data-context-window/);
+});
+
 test("emits an unclassified fallback when monitored chart structure changes without a known semantic delta", () => {
   const before = snap();
   const changedHtml = goHtml.replace('data-model="hy3"', 'data-model="hy3" data-context-window="1m"');

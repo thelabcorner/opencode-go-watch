@@ -98,6 +98,8 @@ test("live dashboard renders every docs model, maker logos, pricing tiers and De
   const body = await response.text();
 
   assert.match(body, /All monitored models · requests per 5 hours/);
+  assert.match(body, /Usage window policy/);
+  assert.match(body, /normalized \$60 monthly reference/);
   assert.match(body, /all 5 visualized/);
   assert.equal((body.match(/class="bar-entry"/g) ?? []).length, 5, "every docs request-table model should get a bar");
   assert.match(body, /GLM-5\.3/);
