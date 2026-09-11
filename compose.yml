@@ -33,6 +33,8 @@ services:
   # wrangler dev does not fire the Worker's scheduled() handler by itself.
   # This sidecar is therefore the homelab scheduler and MUST invoke every
   # independently persisted watcher namespace, not only the Go watcher.
+  # Ten-minute polling is deliberate: one-minute polling was unnecessarily
+  # aggressive for pricing/catalog changes and multiplied upstream traffic 10x.
   cron:
     image: curlimages/curl:latest
     container_name: opencode-go-watch-cron
@@ -54,7 +56,7 @@ services:
               echo "$$(date -u) FAILED /$$path (curl exit $$code)" >&2;
             fi;
           done;
-          sleep 60;
+          sleep 600;
         done
       '
     labels: { traefik.enable: "false" }
