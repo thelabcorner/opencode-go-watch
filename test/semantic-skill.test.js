@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const wrangler = await readFile(new URL("../wrangler.toml", import.meta.url), "utf8");
-const skill = await readFile(new URL("../.opencode/skills/semantic-source-review/SKILL.md", import.meta.url), "utf8");
+// Windows Git checkouts can materialize Markdown with CRLF; the skill's
+// frontmatter grammar is independent of checkout-specific newline bytes.
+const skill = (await readFile(new URL("../.opencode/skills/semantic-source-review/SKILL.md", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
 const sourceMap = await readFile(new URL("../.opencode/skills/semantic-source-review/references/source-map.md", import.meta.url), "utf8");
 const agents = await readFile(new URL("../AGENTS.md", import.meta.url), "utf8");
 
