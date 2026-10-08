@@ -9,7 +9,7 @@ import {
 } from "../src/usage-yield.js";
 
 function request(requestsMonth = 10_000) {
-  return { requests5h: Math.round(requestsMonth / 5), requestsWeek: Math.round(requestsMonth / 2), requestsMonth, unlimited: false };
+  return { requests5h: Math.round(requestsMonth / 5), requestsWeek: Math.round(requestsMonth / 2), requestsMonth, limitState: "finite", limitEvidence: "docs_numeric", unlimited: false };
 }
 
 function price(inputPerM, outputPerM, cachedReadPerM, usageUsd = 60) {
@@ -133,14 +133,30 @@ test("missing cached-read pricing does not get silently treated as free cache", 
 
 test("Go quota-exempt state stays semantically separate from paid Usage Yield", () => {
   const snapshot = goSnapshot();
-  snapshot.docs.requests.Freebie = { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true };
+  snapshot.docs.requests.Freebie = { requests5h: null, requestsWeek: null, requestsMonth: null, limitState: "unlimited", limitEvidence: "docs_explicit_unlimited", unlimited: true };
   snapshot.docs.profiles.Freebie = { inputTokens: 500, cachedTokens: 40_000, outputTokens: 150 };
   snapshot.docs.pricing.Freebie = { inputPerM: null, outputPerM: null, cachedReadPerM: null, cachedWritePerM: null, usageUsd: null };
   const entry = usageYieldFor(buildGoUsageYieldRanking(snapshot), "Freebie");
   assert.equal(entry.class, "quota-exempt");
+  assert.equal(entry.free, false);
+  assert.equal(entry.quotaExempt, true);
   assert.equal(entry.rank, null);
-  assert.equal(entry.costPerEquivalentRequest, 0);
-  assert.match(entry.warnings[0], /separate rate limit/i);
+  assert.equal(entry.costPerEquivalentRequest, null);
+  assert.match(entry.warnings[0], /does not prove free service/i);
+});
+
+test("finite and explicit-infinity sources conflict instead of letting infinity win", () => {
+  const snapshot = goSnapshot();
+  snapshot.go = {
+    chart: {
+      "Go Value": { requests5h: null, limitState: "unlimited", limitEvidence: "chart_explicit_text", unlimited: true },
+    },
+  };
+  const entry = usageYieldFor(buildGoUsageYieldRanking(snapshot), "Go Value");
+  assert.equal(entry.class, "unranked");
+  assert.equal(entry.rank, null);
+  assert.match(entry.warnings.join(" "), /allowance sources conflict/i);
+  assert.doesNotMatch(entry.warnings.join(" "), /quota-exempt status/i);
 });
 
 test("Zen paid models use the same Go-calibrated workload corpus", () => {

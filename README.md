@@ -6,7 +6,7 @@ The project is deliberately not a whole-page hash watcher. It understands models
 
 ## Dashboards
 
-- `/` — OpenCode Go dashboard: allowances, all monitored Go models, model-maker logos, chart/docs values, pricing tiers, DeepSeek peak economics, and Brotli-backed alert history.
+- `/` — OpenCode Go dashboard: allowances, all monitored Go models, model-maker logos, chart/docs values, pricing tiers, DeepSeek peak economics, and bounded alert history.
 - `/zen` — OpenCode Zen dashboard: all currently available Zen models, **free models highlighted first**, complete published pricing variants, API-only/docs-lag models, current offers/discount wording, deprecations, and Zen alert history.
 
 Both dashboards are server-rendered, dependency-free, responsive across desktop/tablet/mobile, and expose no Worker secrets.
@@ -20,8 +20,10 @@ Go is monitored from three complementary surfaces rather than treating any singl
 ### Sources
 
 1. `https://opencode.ai/zen/go/v1/models` — **authoritative public Go availability catalog**. This is the machine-readable list of model IDs OpenCode currently advertises through the Go API namespace.
-2. `https://opencode.ai/go` — live Go usage table, effective 5-hour request presentation, monthly-usage display, and promotions.
-3. `https://opencode.ai/docs/go/` — per-model monthly limits, token pricing, estimated request windows, request profiles, and notes.
+2. `https://opencode.ai/go` — Go/Go Plus comparison chart: independent 5-hour request estimates, monthly dollar allowances, explicit unlimited/free-preview signals, and region markers.
+3. `https://opencode.ai/docs/go/` — both Go and Go Plus monthly-limit/pricing and request-estimate tables, token pricing, request profiles, and policy notes.
+
+As of October 8, 2026, the Go landing chart's `go-plan-chart` representation shows a curated subset of models. Each row contains paired Go/Go Plus requests and monthly dollar allowances; the docs render both plans' tables into the same SSR document. Go remains the historical Usage Yield baseline. Go Plus is independently monitored in `chart[*].plusRequests5h`, `chart[*].plusMonthlyAllowanceUsd`, `docs.requestsPlus`, and `docs.pricingPlus`, with tier-labeled semantic alerts. Previously stored one-plan snapshots can silently acquire the new fields without fabricated numeric transitions. Go API availability is a separate dimension from curated chart membership.
 
 The API catalog and docs are intentionally **not required to contain identical model sets**. OpenCode can expose a model through the Go API before the human-facing docs or economic tables are updated. The watcher therefore treats an API-only model as a real availability state, not as a parser failure or automatic docs mismatch.
 
@@ -34,11 +36,11 @@ The Go models API also emits a fresh `created` timestamp on every response. The 
 | Model lifecycle | request-table model added / removed | rich `NEW MODEL` / `MODEL REMOVED` card |
 | **API availability** | model added / removed from `/zen/go/v1/models` | dedicated Go API model availability card |
 | **API metadata** | stable advertised API metadata changes | dedicated Go API metadata card |
-| Request limits | 5-hour / weekly / monthly estimate changed | grouped per-model percentage deltas |
+| Request limits | Go or Go Plus 5-hour / weekly / monthly estimate changed | grouped per-model, tier-labeled percentage deltas |
 | Usage-window policy | 5-hour / weekly / monthly allowance relationship changed | grouped policy card |
 | Request profile | input/cached/output request assumptions changed | request-profile card |
-| Pricing | pricing row or field added / removed / changed | exact row + dollar/percentage delta |
-| Go chart | chart model added / removed / request count changed | chart card |
+| Pricing | Go or Go Plus pricing row/field added, removed, or changed | exact plan and row + dollar/percentage delta |
+| Go chart | chart model added / removed; Go/Go Plus requests and monthly usage, promotion baseline, chart ID, or region-policy target changed | chart card |
 | Promotion | multiplier / bonus / banner changed | usage-update card |
 | Cross-check | chart and docs disagree unexpectedly | mismatch warning / resolved notice |
 | Usage notes | DeepSeek peak hours, disclaimers, relevant wording | before/after note card |
@@ -182,7 +184,7 @@ After   …new metadata…
 Go and Zen have **independent baselines and error states**. A Zen outage cannot prevent Go from checking, and a Go parser failure cannot stop Zen monitoring.
 
 ```text
-Cloudflare Cron · every 5 minutes
+Cloudflare Cron · every 10 minutes
         |
         +--------------------------+
         |                          |
@@ -249,20 +251,20 @@ Both monitors are designed around Cloudflare Free-tier efficiency:
 10. Go and Zen scheduled work runs concurrently and fails independently
 11. expensive residual normalization only runs after a monitored source actually changes
 
-Source GETs get one safe retry on transient network/timeout/5xx failures. Telegram POSTs are deliberately **not** automatically retried because an ambiguous POST retry could duplicate an alert.
+Source GETs get up to two safe retries on transient network/timeout/5xx failures. Telegram POSTs are deliberately **not** automatically retried because an ambiguous POST retry could duplicate an alert.
 
 ---
 
-## Brotli-compressed alert history
+## Bounded alert history
 
 The dashboards use one shared rolling alert archive in KV:
 
 - actionable alerts only — unchanged checks add nothing
 - newest first
 - maximum 96 retained events
-- maximum 96 KiB of JSON before compression
-- one binary KV value rather than one key per alert
-- Brotli quality 5 using Cloudflare `node:zlib`
+- maximum 96 KiB of stored UTF-8 JSON
+- one bounded KV value rather than one key per alert
+- legacy Brotli-compressed history remains readable during migration
 - history failure is observability-only and never blocks monitoring/baseline advancement
 
 The Go dashboard shows recent Go activity; `/zen` filters the same archive to Zen events.
@@ -280,7 +282,7 @@ The Go dashboard shows recent Go activity; `/zen` filters the same archive to Ze
 - Go and Zen use separate operational error states
 - enabling Go API monitoring on an existing baseline does not announce the existing catalog as newly added
 
-Separate real changes published in different five-minute snapshots can still generate separate notifications.
+Separate real changes published in different polling snapshots can still generate separate notifications.
 
 ---
 
@@ -364,7 +366,7 @@ npm run test:coverage
 npx wrangler deploy
 ```
 
-Wrangler automatically provisions/binds the `STATE` KV namespace when required. The same `*/5 * * * *` cron drives Go and Zen; no second scheduled Worker is needed.
+Wrangler automatically provisions/binds the `STATE` KV namespace when required. The same `*/10 * * * *` cron drives Go and Zen; no second scheduled Worker is needed.
 
 To trigger Go's three-source check immediately after deployment:
 
@@ -396,7 +398,9 @@ https://YOUR-WORKER.workers.dev/zen
 ```bash
 npm run validate
 npm run test:coverage
+npm run cf:dry-run
+node scripts/live-usage-yield-smoke.mjs
 npm run bench
 ```
 
-The regression suite covers Go parser history, Go models API canonicalization and semantic availability diffs, volatile timestamp suppression, API baseline migration, suspicious catalog shrink protection, semantic diffs, unknown-change fallback, Telegram grouping, delivery safety, transition circuit breakers, conditional-request hot paths, Brotli history, responsive dashboards, Zen docs/API parsing, free-model lifecycle, discounts/price drops, owner changes, deprecations, Zen unknown-change fallback, Zen route security, independent baseline reset, and Zen `304` fast paths.
+The regression suite covers the live Go/Go Plus comparison representation, two-plan docs SSR tables, independent plan alerts, old-snapshot compatibility, rejection of ambiguous infinity and missing paired cells, reorder/hydration neutrality, Go parser history, Go models API canonicalization and semantic availability diffs, volatile timestamp suppression, API baseline migration, suspicious catalog shrink protection, semantic diffs, unknown-change fallback, Telegram grouping, delivery safety, transition circuit breakers, conditional-request hot paths, raw-JSON history plus legacy Brotli migration, responsive dashboards, Zen docs/API parsing, free-model lifecycle, discounts/price drops, owner changes, deprecations, Zen unknown-change fallback, Zen route security, independent baseline reset, and Zen `304` fast paths. Syntax and TypeScript checks use cross-platform Node and `tsconfig.json`, so `npm run validate` works on Windows PowerShell as well as Linux CI.

@@ -37,7 +37,7 @@ const [goHtml, goDocsHtml, goModelsJson, zenDocsHtml, zenModelsJson] = await Pro
 
 const checkedAt = new Date().toISOString();
 const goSnapshot = {
-  schema: 5,
+  schema: 8,
   checkedAt,
   sources: { go: URLS.go, docs: URLS.goDocs, api: URLS.goModels },
   sourceState: {},
@@ -46,6 +46,9 @@ const goSnapshot = {
   api: parseGoModelsApi(goModelsJson),
 };
 validateSnapshot(goSnapshot);
+if (goSnapshot.go.chart["Kimi K3"]?.plusRequests5h != null && !goSnapshot.docs.requestsPlus) {
+  throw new Error("Go Plus chart is available but its independent docs request table is missing");
+}
 
 const goRanking = buildGoUsageYieldRanking(goSnapshot);
 if (goRanking.calibration.stats.uniqueWorkloads < 8) {
@@ -99,7 +102,10 @@ console.log(JSON.stringify({
   calibrationShapes: goRanking.calibration.stats.uniqueWorkloads,
   calibrationMedianContext: goRanking.calibration.stats.contextMedian,
   go: {
+    chartModels: Object.keys(goSnapshot.go.chart).length,
     parsedModels: Object.keys(goSnapshot.docs.requests).length,
+    plusDocsModels: Object.keys(goSnapshot.docs.requestsPlus ?? {}).length,
+    plusPricingRows: Object.keys(goSnapshot.docs.pricingPlus ?? {}).length,
     apiModels: goSnapshot.api.modelIds.length,
     rankedPaid: goRanking.paidEntries.length,
     quotaExempt: quotaExempt.length,

@@ -1,4 +1,4 @@
-import { canonicalModelKey, deriveConsistency } from "./parsers.js";
+import { assessGoAllowanceState, canonicalModelKey, deriveConsistency, limitStateOf } from "./parsers.js";
 import { basePricingName, buildGoUsageYieldRanking, usageYieldFor } from "./usage-yield.js";
 
 const MAX_MESSAGE = 3850;
@@ -14,6 +14,8 @@ const LABELS = Object.freeze({
   requests5h: "5 hour",
   requestsWeek: "Weekly",
   requestsMonth: "Monthly",
+  promotionMultiplier: "Promo multiplier",
+  promotionTiming: "Promo timing",
   inputTokens: "Input/request",
   cachedTokens: "Cached/request",
   outputTokens: "Output/request",
@@ -22,9 +24,16 @@ const LABELS = Object.freeze({
   cachedReadPerM: "Cached read / 1M",
   cachedWritePerM: "Cached write / 1M",
   usageUsd: "Included usage",
+  baseRequests5h: "Promo base · 5 hour",
+  monthlyAllowanceUsd: "Monthly usage",
+  baseMonthlyAllowanceUsd: "Promo base · monthly",
+  regionUrl: "Region policy",
   bonus: "Promotion",
-  modelId: "Model ID",
-  unlimited: "Go allowance mode",
+  chartId: "Chart ID",
+  limitState: "Go allowance state",
+  plusRequests5h: "Go Plus · 5 hour",
+  plusMonthlyAllowanceUsd: "Go Plus · monthly",
+  plusLimitState: "Go Plus allowance state",
   deepSeekPeakHours: "DeepSeek peak hours",
   limitsDisclaimer: "Limits disclaimer",
 });
@@ -62,8 +71,21 @@ function direction(before, after) {
   return "→";
 }
 function labelField(field) { return LABELS[field] ?? field; }
-function limitMode(value) { return value ? "∞ / quota-exempt" : "metered"; }
-function fmtRequest(row, field = "requests5h") { return row?.unlimited ? "∞" : fmtNumber(row?.[field]); }
+function limitMode(value) {
+  if (value === "unlimited") return "explicit ∞ / quota-exempt";
+  if (value === "unknown") return "unknown / not inferred";
+  if (value === "finite") return "metered";
+  return "unknown";
+}
+function evidencedState(row, source) {
+  return source === "docs"
+    ? assessGoAllowanceState(null, row).docsState
+    : assessGoAllowanceState(row, null).chartState;
+}
+function fmtRequest(row, field = "requests5h", source = "chart") {
+  const state = evidencedState(row, source);
+  return state === "unlimited" ? "∞" : state === "unknown" ? "unknown" : fmtNumber(row?.[field]);
+}
 
 function formatTime(iso, timeZone) {
   try {
@@ -76,10 +98,14 @@ function formatTime(iso, timeZone) {
   } catch { return iso; }
 }
 
-function requestGrid(row) {
+function requestGrid(row, plan = "Go") {
   if (!row) return "";
-  if (row.unlimited) {
-    return `<pre>Go quota  ∞</pre>\n<i>OpenCode marks this model outside the Go dollar allowance. Separate free-model rate limits may still apply.</i>`;
+  const state = evidencedState(row, "docs");
+  if (state === "unlimited") {
+    return `<pre>${plan} quota  ∞</pre>\n<i>An explicit source signal marks the ${plan} allowance as quota-exempt. This does not establish free service or unrestricted provider/API access.</i>`;
+  }
+  if (state === "unknown") {
+    return `<pre>${plan} quota  unknown</pre>\n<i>No numeric or explicit ∞ evidence is published here; the watcher refuses to infer quota exemption.</i>`;
   }
   const cells = [["5 hour", fmtNumber(row.requests5h)], ["week", fmtNumber(row.requestsWeek)], ["month", fmtNumber(row.requestsMonth)]];
   const width = Math.max(...cells.map(([, value]) => value.length));
@@ -119,7 +145,7 @@ function calibrationLine(ranking) {
 function goUsageValueLine(ranking, model) {
   const entry = usageYieldFor(ranking, model);
   if (!entry || entry.class === "unranked") return `💸 <b>Usage value</b>  <i>pending standardized pricing/workload evidence</i>`;
-  if (entry.class === "quota-exempt") return `💸 <b>Usage value</b>  <b>FREE · Go quota-exempt</b>\n<i>∞ is the Go allowance state; it does not prove an independent free-model gateway has no rate limit.</i>`;
+  if (entry.class === "quota-exempt") return `💸 <b>Usage value</b>  <b>Go quota-exempt</b>\n<i>Explicit ∞/quota evidence is not treated as proof of free service or unrestricted provider/API capacity.</i>`;
   const monthly = entry.goCapacity?.monthlyEquivalentRequests;
   const best = typeof entry.fractionOfBest === "number" ? `${(entry.fractionOfBest * 100).toFixed(0)}% of best` : "";
   const core = [
@@ -145,15 +171,16 @@ function renderModelAdded(change, snapshot, ranking) {
   const model = change.key;
   const chart = chartForModel(snapshot, model);
   const pricing = pricingForModel(snapshot, model);
-  const unlimited = Boolean(change.after?.unlimited || chart?.unlimited);
+  const allowance = assessGoAllowanceState(chart, change.after);
+  const corroboratedQuotaExempt = allowance.state === "quota_exempt" && allowance.confidence === "high";
   const parts = [
-    unlimited ? `♾️ <b>UNLIMITED GO MODEL ADDED</b>` : `🆕 <b>MODEL ADDED</b>`,
+    corroboratedQuotaExempt ? `♾️ <b>GO QUOTA-EXEMPT MODEL ADDED</b>` : `🆕 <b>MODEL ADDED</b>`,
     `<b>${escapeHtml(model)}</b>`,
     goUsageValueLine(ranking, model),
     calibrationLine(ranking),
     requestGrid(change.after),
   ];
-  if (chart) parts.push(`📈 <b>Go chart</b>  <code>${chart.unlimited ? "∞" : fmtNumber(chart.requests5h)}</code> / 5h${chart.bonus ? `  ·  🎁 ${escapeHtml(chart.bonus)}` : ""}`);
+  if (chart) parts.push(`📈 <b>Go chart</b>  <code>${fmtRequest(chart)}</code> / 5h${typeof chart.monthlyAllowanceUsd === "number" ? `  ·  <code>${fmtMoney(chart.monthlyAllowanceUsd)}</code> monthly` : ""}${chart.bonus ? `  ·  🎁 ${escapeHtml(chart.bonus)}` : ""}${chart.regionUrl ? `\n🌍 Region policy: <code>${escapeHtml(chart.regionUrl)}</code>` : ""}`);
   const profile = snapshot.docs.profiles?.[model];
   if (profile) parts.push(profileLine(profile));
   if (pricing.length) parts.push(pricingSummary(pricing));
@@ -162,8 +189,9 @@ function renderModelAdded(change, snapshot, ranking) {
 
 function renderModelRemoved(change, relatedChanges) {
   const pricingRemoved = relatedChanges.filter((item) => item.type === "pricing_row_removed");
+  const state = evidencedState(change.before, "docs");
   return [
-    change.before?.unlimited ? `♾️ <b>UNLIMITED GO MODEL REMOVED</b>` : `🗑 <b>MODEL REMOVED</b>`,
+    state === "unlimited" ? `♾️ <b>GO QUOTA-EXEMPT MODEL REMOVED</b>` : `🗑 <b>MODEL REMOVED</b>`,
     `<b>${escapeHtml(change.key)}</b>`,
     `<i>Previous request estimates</i>`, requestGrid(change.before),
     pricingRemoved.length ? `💰 ${pricingRemoved.length} associated pricing row${pricingRemoved.length === 1 ? "" : "s"} removed` : "",
@@ -172,17 +200,25 @@ function renderModelRemoved(change, relatedChanges) {
 
 function renderRequestChanges(model, changes, ranking) {
   const lines = changes.map((change) => {
-    if (change.field === "unlimited") return `${labelField(change.field)}: <code>${limitMode(change.before)} → ${limitMode(change.after)}</code>`;
+    const label = `${change.plan === "Go Plus" ? "Go Plus · " : ""}${labelField(change.field)}`;
+    if (change.field === "limitState") return `${label}: <code>${limitMode(change.before)} → ${limitMode(change.after)}</code>`;
     const pct = fmtPercent(change.percent);
-    return `${labelField(change.field).padEnd(8)} <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code>  ${direction(change.before, change.after)}${pct ? ` ${pct}` : ""}`;
+    return `${label.padEnd(8)} <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code>  ${direction(change.before, change.after)}${pct ? ` ${pct}` : ""}`;
   });
-  const modeChange = changes.some((change) => change.field === "unlimited");
-  return `${modeChange ? "♾️ <b>GO ALLOWANCE MODE CHANGED</b>" : "📊 <b>REQUEST LIMIT CHANGED</b>"}\n<b>${escapeHtml(model)}</b>\n${goUsageValueLine(ranking, model)}\n${lines.join("\n")}`;
+  const modeChange = changes.some((change) => change.field === "limitState");
+  return `${modeChange ? "⚖️ <b>GO ALLOWANCE STATE CHANGED</b>" : "📊 <b>REQUEST LIMIT CHANGED</b>"}\n<b>${escapeHtml(model)}</b>\n${goUsageValueLine(ranking, model)}\n${lines.join("\n")}`;
+}
+function renderPromotionChanges(model, changes) {
+  const lines = changes.map((change) => {
+    if (change.field === "promotionMultiplier") return `${labelField(change.field)}: <code>${fmtNumber(change.before)}x → ${fmtNumber(change.after)}x</code>`;
+    return `${labelField(change.field)}: <code>${escapeHtml(change.before ?? "none")} → ${escapeHtml(change.after ?? "none")}</code>`;
+  });
+  return `🎁 <b>PROMOTION WINDOW CHANGED</b>\n<b>${escapeHtml(model)}</b>\n${lines.join("\n")}`;
 }
 function renderPricingChanges(rowName, changes, ranking) {
   const lines = changes.map((change) => {
     const pct = fmtPercent(change.percent);
-    return `${labelField(change.field)}: <code>${fmtMoney(change.before)} → ${fmtMoney(change.after)}</code> ${direction(change.before, change.after)}${pct ? ` ${pct}` : ""}`;
+    return `${change.plan === "Go Plus" ? "Go Plus · " : ""}${labelField(change.field)}: <code>${fmtMoney(change.before)} → ${fmtMoney(change.after)}</code> ${direction(change.before, change.after)}${pct ? ` ${pct}` : ""}`;
   });
   return `💰 <b>PRICING CHANGED</b>\n<b>${escapeHtml(rowName)}</b>\n${goUsageValueLine(ranking, basePricingName(rowName))}\n${lines.join("\n")}`;
 }
@@ -190,22 +226,20 @@ function renderProfileChanges(model, changes, ranking) {
   const lines = changes.map((change) => `${labelField(change.field)}: <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code> ${direction(change.before, change.after)} ${fmtPercent(change.percent)}`.trim());
   return `🧠 <b>REQUEST PROFILE CHANGED</b>\n<b>${escapeHtml(model)}</b>\n${goUsageValueLine(ranking, model)}\n${lines.join("\n")}\n📐 <i>The shared V2 workload corpus was recalculated; all paid Usage Value ranks are recomputed from the new corpus.</i>`;
 }
-function modelId(value) {
-  const id = String(value ?? "").trim();
-  if (!id) return "none";
-  return id.includes("/") ? id : `opencode/${id}`;
-}
 function renderChartChanges(model, changes, ranking) {
-  const onlyModelId = changes.every((change) => change.field === "modelId");
-  const hasUnlimited = changes.some((change) => change.field === "unlimited");
+  const onlyChartId = changes.every((change) => change.field === "chartId");
+  const hasLimitState = changes.some((change) => change.field === "limitState" || change.field === "plusLimitState");
   const lines = changes.map((change) => {
     if (change.field === "bonus") return `Promotion: <code>${escapeHtml(change.before ?? "none")} → ${escapeHtml(change.after ?? "none")}</code>`;
-    if (change.field === "modelId") return `Model ID: <code>${escapeHtml(modelId(change.before))} → ${escapeHtml(modelId(change.after))}</code>`;
-    if (change.field === "unlimited") return `Go allowance: <code>${limitMode(change.before)} → ${limitMode(change.after)}</code>`;
-    return `5 hour: <code>${fmtNumber(change.before)} → ${fmtNumber(change.after)}</code> ${direction(change.before, change.after)} ${fmtPercent(change.percent)}`.trim();
+    if (change.field === "chartId") return `Chart ID: <code>${escapeHtml(change.before ?? "none")} → ${escapeHtml(change.after ?? "none")}</code>`;
+    if (change.field === "limitState" || change.field === "plusLimitState") return `${change.field === "plusLimitState" ? "Go Plus" : "Go"} allowance: <code>${limitMode(change.before)} → ${limitMode(change.after)}</code>`;
+    if (change.field === "regionUrl") return `Region policy: <code>${escapeHtml(change.before ?? "none")} → ${escapeHtml(change.after ?? "none")}</code>`;
+    const money = change.field === "monthlyAllowanceUsd" || change.field === "baseMonthlyAllowanceUsd" || change.field === "plusMonthlyAllowanceUsd";
+    const format = money ? fmtMoney : fmtNumber;
+    return `${labelField(change.field)}: <code>${format(change.before)} → ${format(change.after)}</code> ${direction(change.before, change.after)} ${fmtPercent(change.percent)}`.trim();
   });
-  const title = onlyModelId ? "🪪 <b>GO MODEL ID CHANGED</b>" : hasUnlimited ? "♾️ <b>GO ALLOWANCE MODE CHANGED</b>" : "📈 <b>GO CHART CHANGED</b>";
-  return `${title}\n<b>${escapeHtml(model)}</b>${hasUnlimited ? `\n${goUsageValueLine(ranking, model)}` : ""}\n${lines.join("\n")}`;
+  const title = onlyChartId ? "🪪 <b>GO CHART ID CHANGED</b>" : hasLimitState ? "⚖️ <b>GO ALLOWANCE STATE CHANGED</b>" : "📈 <b>GO CHART CHANGED</b>";
+  return `${title}\n<b>${escapeHtml(model)}</b>${hasLimitState ? `\n${goUsageValueLine(ranking, model)}` : ""}\n${lines.join("\n")}`;
 }
 function groupByKey(changes, type) {
   const groups = new Map();
@@ -231,6 +265,9 @@ function renderBlocks(changes, snapshot) {
   for (const [model, group] of groupByKey(changes, "request_limit_changed")) {
     const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderRequestChanges(model, active, ranking));
   }
+  for (const [model, group] of groupByKey(changes, "request_promotion_changed")) {
+    const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderPromotionChanges(model, active));
+  }
   for (const [name, group] of groupByKey(changes, "pricing_changed")) {
     const active = group.filter((item) => !consumed.has(item.__index)); if (!active.length) continue; active.forEach((item) => consumed.add(item.__index)); blocks.push(renderPricingChanges(name, active, ranking));
   }
@@ -252,10 +289,18 @@ function renderBlocks(changes, snapshot) {
       case "request_profile_removed": blocks.push(`🧠 <b>REQUEST PROFILE REMOVED</b>\n<b>${escapeHtml(change.key)}</b>\n${goUsageValueLine(ranking, change.key)}\n📐 <i>Shared V2 workload corpus recalibrated.</i>`); break;
       case "pricing_row_added": blocks.push(`💰 <b>PRICING ROW ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${goUsageValueLine(ranking, basePricingName(change.key))}\n${pricingSummary([[change.key, change.after]], 1)}`); break;
       case "pricing_row_removed": blocks.push(`🧹 <b>PRICING ROW REMOVED</b>\n<b>${escapeHtml(change.key)}</b>\n${goUsageValueLine(ranking, basePricingName(change.key))}`); break;
-      case "chart_model_added": blocks.push(`${change.after?.unlimited ? "♾️ <b>UNLIMITED GO CHART MODEL ADDED</b>" : "🟢 <b>GO CHART MODEL ADDED</b>"}\n<b>${escapeHtml(change.key)}</b>\n${change.after?.unlimited ? `${goUsageValueLine(ranking, change.key)}\n` : ""}<code>${fmtRequest(change.after)}</code> requests / 5h${change.after?.unlimited ? "\n<i>Go quota-exempt; separate free-model rate limits may still apply.</i>" : ""}${change.after?.bonus ? `\n🎁 ${escapeHtml(change.after.bonus)}` : ""}`); break;
-      case "chart_model_removed": blocks.push(`${change.before?.unlimited ? "♾️ <b>UNLIMITED GO CHART MODEL REMOVED</b>" : "🔴 <b>GO CHART MODEL REMOVED</b>"}\n<b>${escapeHtml(change.key)}</b>\nwas <code>${fmtRequest(change.before)}</code> requests / 5h`); break;
+      case "go_plus_request_row_added": blocks.push(`📊 <b>GO PLUS REQUEST MODEL ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${requestGrid(change.after, "Go Plus")}`); break;
+      case "go_plus_request_row_removed": blocks.push(`📊 <b>GO PLUS REQUEST MODEL REMOVED</b>\n<b>${escapeHtml(change.key)}</b>`); break;
+      case "go_plus_pricing_row_added": blocks.push(`💰 <b>GO PLUS PRICING ROW ADDED</b>\n<b>${escapeHtml(change.key)}</b>\n${pricingSummary([[change.key, change.after]], 1)}`); break;
+      case "go_plus_pricing_row_removed": blocks.push(`💰 <b>GO PLUS PRICING ROW REMOVED</b>\n<b>${escapeHtml(change.key)}</b>`); break;
+      case "chart_model_added": {
+        const state = evidencedState(change.after, "chart");
+        blocks.push(`${state === "unlimited" ? "♾️ <b>GO CHART EXPLICIT ∞ MODEL ADDED</b>" : "🟢 <b>GO CHART MODEL ADDED</b>"}\n<b>${escapeHtml(change.key)}</b>\n${state === "unlimited" ? `${goUsageValueLine(ranking, change.key)}\n` : ""}<code>${fmtRequest(change.after)}</code> requests / 5h${typeof change.after?.monthlyAllowanceUsd === "number" ? ` · <code>${fmtMoney(change.after.monthlyAllowanceUsd)}</code> monthly` : ""}${state === "unlimited" ? "\n<i>The chart explicitly shows ∞; this is not treated as proof of free or unrestricted provider/API access.</i>" : ""}${change.after?.bonus ? `\n🎁 ${escapeHtml(change.after.bonus)}` : ""}${change.after?.regionUrl ? `\n🌍 <code>${escapeHtml(change.after.regionUrl)}</code>` : ""}`);
+        break;
+      }
+      case "chart_model_removed": blocks.push(`${evidencedState(change.before, "chart") === "unlimited" ? "♾️ <b>GO CHART EXPLICIT ∞ MODEL REMOVED</b>" : "🔴 <b>GO CHART MODEL REMOVED</b>"}\n<b>${escapeHtml(change.key)}</b>\nwas <code>${fmtRequest(change.before)}</code> requests / 5h`); break;
       case "promo_banner_changed": blocks.push(`🎁 <b>PROMOTION BANNER CHANGED</b>\n<code>${escapeHtml(change.before ?? "none")}</code>\n↓\n<code>${escapeHtml(change.after ?? "none")}</code>`); break;
-      case "consistency_mismatch": blocks.push(`⚠️ <b>CHART / DOCS MISMATCH</b>\n<b>${escapeHtml(change.key)}</b>\nchart <code>${change.after?.chartUnlimited ? "∞" : fmtNumber(change.after?.chart)}</code> · docs <code>${change.after?.docsUnlimited ? "∞" : fmtNumber(change.after?.docs)}</code>`); break;
+      case "consistency_mismatch": blocks.push(`⚠️ <b>CHART / DOCS MISMATCH</b>\n<b>${escapeHtml(change.key)}</b>\nchart <code>${change.after?.chartLimitState ? limitMode(change.after.chartLimitState) : fmtNumber(change.after?.chart)}</code> · docs <code>${change.after?.docsLimitState ? limitMode(change.after.docsLimitState) : fmtNumber(change.after?.docs)}</code>`); break;
       case "consistency_resolved": blocks.push(`✅ <b>CHART / DOCS MISMATCH RESOLVED</b>\n<b>${escapeHtml(change.key)}</b>`); break;
       case "usage_note_added": case "usage_note_removed": case "usage_note_changed": blocks.push(`🕒 <b>${escapeHtml(labelField(change.key))} changed</b>\n<code>${escapeHtml(change.before ?? "none")}</code>\n↓\n<code>${escapeHtml(change.after ?? "none")}</code>`); break;
       case "usage_copy_changed": blocks.push(`📝 <b>USAGE SECTION WORDING CHANGED</b>\n<b>Before</b> <code>${escapeHtml(change.before || "…")}</code>\n<b>After</b> <code>${escapeHtml(change.after || "…")}</code>`); break;
@@ -273,9 +318,9 @@ function renderBlocks(changes, snapshot) {
 function headlineFor(changes) {
   const types = new Set(changes.map((change) => change.type));
   if (types.has("unclassified_source_change")) return "🟡 <b>OPENCODE GO · UNCLASSIFIED CHANGE</b>";
-  if (changes.some((change) => change.after?.unlimited === true || change.field === "unlimited" && change.after === true)) return "♾️ <b>OPENCODE GO · UNLIMITED ACCESS UPDATE</b>";
-  if (changes.some((change) => change.before?.unlimited === true && /removed$/.test(change.type))) return "♾️ <b>OPENCODE GO · UNLIMITED MODEL REMOVED</b>";
-  if (changes.length > 0 && changes.every((change) => change.type === "chart_changed" && change.field === "modelId")) return "🪪 <b>OPENCODE GO · MODEL ID CHANGED</b>";
+  if (types.has("request_promotion_changed")) return "🎁 <b>OPENCODE GO · PROMOTION UPDATE</b>";
+  if (changes.some((change) => change.field === "limitState" || change.field === "plusLimitState")) return "⚖️ <b>OPENCODE GO · ALLOWANCE STATE UPDATE</b>";
+  if (changes.length > 0 && changes.every((change) => change.type === "chart_changed" && change.field === "chartId")) return "🪪 <b>OPENCODE GO · CHART ID CHANGED</b>";
   if (changes.filter((change) => change.type === "model_added").length === 1 && types.size <= 4) return "🆕 <b>OPENCODE GO · NEW MODEL</b>";
   if (changes.filter((change) => change.type === "model_removed").length === 1 && types.size <= 4) return "🗑 <b>OPENCODE GO · MODEL REMOVED</b>";
   if ([...types].some((type) => type.includes("pricing"))) return "💰 <b>OPENCODE GO · PRICING UPDATE</b>";
@@ -301,7 +346,12 @@ export function buildChangeMessages(changes, snapshot, timeZone = "America/Chica
 export function buildBootMessage(snapshot, timeZone = "America/Chicago") {
   const modelCount = Object.keys(snapshot.docs.requests).length;
   const chartCount = Object.keys(snapshot.go.chart).length;
-  const unlimited = Object.entries(snapshot.go.chart).filter(([, row]) => row.unlimited);
+  const allowanceStates = Object.entries(snapshot.go.chart).map(([name, chart]) => ({
+    name,
+    allowance: assessGoAllowanceState(chart, snapshot.docs.requests?.[name]),
+  }));
+  const corroboratedQuotaExempt = allowanceStates.filter(({ allowance }) => allowance.state === "quota_exempt" && allowance.confidence === "high");
+  const chartOnlyQuotaExempt = allowanceStates.filter(({ allowance }) => allowance.state === "quota_exempt" && allowance.confidence === "medium");
   const limits = snapshot.docs.limits;
   const consistency = deriveConsistency(snapshot.go, snapshot.docs);
   const mismatches = Object.values(consistency).filter((item) => item.status === "mismatch").length;
@@ -314,8 +364,9 @@ export function buildBootMessage(snapshot, timeZone = "America/Chicago") {
     `<b>Window policy · $60 monthly reference</b>\n<pre>5 hour  ${fmtMoney(limits.fiveHourUsd)}\nweek    ${fmtMoney(limits.weeklyUsd)}\nmonth   ${fmtMoney(limits.monthlyUsd)}</pre>`,
     best ? `💸 <b>Best paid Usage Value</b>  ${escapeHtml(best.name)} · ~${fmtYield(best.goCapacity?.monthlyEquivalentRequests)} standardized requests / monthly Go allowance` : "",
     ranking.calibration?.stats?.uniqueWorkloads ? `📐 V2 calibration: <b>${ranking.calibration.stats.uniqueWorkloads}</b> unique OpenCode request shapes` : "",
-    unlimited.length ? `♾️ <b>${unlimited.length}</b> Go quota-exempt model${unlimited.length === 1 ? "" : "s"}: ${unlimited.map(([name]) => escapeHtml(name)).join(" · ")}` : "",
-    unlimited.length ? `<i>∞ reflects the Go allowance surface; separate free-model rate limits may still apply.</i>` : "",
+    corroboratedQuotaExempt.length ? `♾️ <b>${corroboratedQuotaExempt.length}</b> corroborated Go quota-exempt model${corroboratedQuotaExempt.length === 1 ? "" : "s"}: ${corroboratedQuotaExempt.map(({ name }) => escapeHtml(name)).join(" · ")}` : "",
+    chartOnlyQuotaExempt.length ? `ℹ️ <b>${chartOnlyQuotaExempt.length}</b> explicit ∞ state${chartOnlyQuotaExempt.length === 1 ? "" : "s"} awaiting cross-source corroboration: ${chartOnlyQuotaExempt.map(({ name }) => escapeHtml(name)).join(" · ")}` : "",
+    corroboratedQuotaExempt.length || chartOnlyQuotaExempt.length ? `<i>Quota-exempt Go allowance evidence is never reported as proof of free service or unrestricted provider/API capacity.</i>` : "",
     promos.length ? `🎁 ${promos.map(([name, item]) => `${escapeHtml(name)} ${item.multiplier}x`).join(" · ")}` : "",
     mismatches ? `⚠️ ${mismatches} unexplained chart/docs mismatch${mismatches === 1 ? "" : "es"}` : "✅ Chart/docs cross-check healthy",
     snapshot.go.promoBanner ? `\n<i>${escapeHtml(snapshot.go.promoBanner)}</i>` : "", "", `🕒 ${escapeHtml(formatTime(snapshot.checkedAt, timeZone))}`,

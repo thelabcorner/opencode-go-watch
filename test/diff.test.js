@@ -30,7 +30,7 @@ test("finds changed requests, additions/removals, pricing and chart changes", ()
   assert(changes.some((c) => c.type === "chart_changed" && c.key === "Hy3" && c.field === "bonus"));
 });
 
-test("classifies a stable Go model's data-model ID replacement semantically", () => {
+test("classifies a stable Go model's data-model chart ID replacement semantically", () => {
   const beforeHtml = goHtml.replace('data-model="hy3"', 'data-model="x-preview-f-free"');
   const afterHtml = goHtml.replace('data-model="hy3"', 'data-model="ox-alpha-free"');
   const before = { ...snap(), go: parseGoPage(beforeHtml) };
@@ -40,14 +40,14 @@ test("classifies a stable Go model's data-model ID replacement semantically", ()
   assert.deepEqual(changes, [{
     type: "chart_changed",
     key: "Hy3",
-    field: "modelId",
+    field: "chartId",
     before: "x-preview-f-free",
     after: "ox-alpha-free",
   }]);
   assert.equal(changes.some((change) => change.type === "unclassified_source_change"), false);
 });
 
-test("classifies data-model replacements in current go-usage row markup", () => {
+test("classifies data-model replacements as chart IDs in current go-usage row markup", () => {
   const page = (id) => `<figure data-component="go-usage">
     <div role="row" data-slot="model-row" data-model="${id}">
       <div role="rowheader" data-slot="model"><bdi>Example Model</bdi></div>
@@ -60,10 +60,65 @@ test("classifies data-model replacements in current go-usage row markup", () => 
   assert.deepEqual(diffSnapshots(before, after), [{
     type: "chart_changed",
     key: "Example Model",
-    field: "modelId",
+    field: "chartId",
     before: "example-v1",
     after: "example-v2",
   }]);
+});
+
+test("current chart allowance, promotion baselines, and region policy are typed semantic changes", () => {
+  const page = ({ baseRequests = 1000, requests = 2000, baseAllowance = 15, allowance = 30, policy = "https://example.com/a" } = {}) => `<figure data-component="go-usage">
+    <div role="row" data-slot="model-row" data-model="example">
+      <div data-slot="model"><bdi>Example Model</bdi><span data-slot="badge">2x usage</span><a data-slot="region" href="${policy}">regions</a></div>
+      <div data-slot="usage-value"><div data-slot="requests"><s>${baseRequests}</s><bdi>${requests}</bdi></div></div>
+      <div data-slot="allowance"><s>$${baseAllowance}</s><bdi>$${allowance}</bdi></div>
+    </div>
+  </figure>`;
+  const base = snap();
+  const before = { ...base, go: parseGoPage(page()) };
+  const after = { ...base, go: parseGoPage(page({ baseRequests: 1200, requests: 2000, baseAllowance: 20, allowance: 40, policy: "https://example.com/b" })) };
+  const changes = diffSnapshots(before, after);
+  assert.deepEqual(changes.filter((change) => change.type === "chart_changed").map((change) => change.field).sort(), ["baseMonthlyAllowanceUsd", "baseRequests5h", "monthlyAllowanceUsd", "regionUrl"]);
+  assert.equal(changes.some((change) => change.type === "unclassified_source_change"), false);
+});
+
+test("new chart fields silently baseline when upgrading an older snapshot", () => {
+  const after = snap();
+  const before = structuredClone(after);
+  for (const row of Object.values(before.go.chart)) {
+    delete row.baseRequests5h;
+    delete row.monthlyAllowanceUsd;
+    delete row.baseMonthlyAllowanceUsd;
+    delete row.regionUrl;
+  }
+  assert.deepEqual(diffSnapshots(before, after), []);
+});
+
+test("temporary request-table promotion suffix does not look like a model removal/addition", () => {
+  const before = snap();
+  const after = structuredClone(before);
+  const row = before.docs.requests.Hy3;
+  delete before.docs.requests.Hy3;
+  before.docs.requests["Hy3 8x · Ends Sep 20"] = row;
+  assert.deepEqual(diffSnapshots(before, after), []);
+});
+
+test("request-table promotion deadline changes are typed metadata, never model churn", () => {
+  const before = snap();
+  const after = structuredClone(before);
+  before.docs.requests.Hy3.promotionMultiplier = 8;
+  before.docs.requests.Hy3.promotionTiming = "Ends Sep 20";
+  after.docs.requests.Hy3.promotionMultiplier = 8;
+  after.docs.requests.Hy3.promotionTiming = "Ends Sep 27";
+  const changes = diffSnapshots(before, after);
+  assert.deepEqual(changes, [{
+    type: "request_promotion_changed",
+    key: "Hy3",
+    field: "promotionTiming",
+    before: "Ends Sep 20",
+    after: "Ends Sep 27",
+  }]);
+  assert.equal(changes.some((change) => change.type === "model_added" || change.type === "model_removed"), false);
 });
 
 test("unknown semantic attributes in current go-usage rows still hit the residual fallback", () => {

@@ -2,7 +2,7 @@
 
 ## Semantic monitoring changes
 
-For any commit that changes scrape-source interpretation or semantic monitoring behavior — including `src/parsers.js`, `src/diff.js`, `src/watcher.js`, `src/zen-watcher.js`, residual normalization, semantic alert types, or fixes prompted by an **UNCLASSIFIED** Telegram notification — load and follow the repository skill:
+For any commit that changes scrape-source interpretation or semantic monitoring behavior — including `src/parsers.js`, `src/diff.js`, `src/watcher.js`, `src/zen.js`, residual normalization, semantic alert types, or fixes prompted by an **UNCLASSIFIED** Telegram notification — load and follow the repository skill:
 
 `.opencode/skills/semantic-source-review/SKILL.md`
 

@@ -1,9 +1,11 @@
 import { canonicalMonitoredHtml, extractHtmlTables, extractSectionHtml, normalizeSpace, textContent } from "./html.js";
 
-const MONEY = /^\$([\d.]+)$/;
+const MONEY = /^\$\s*([\d.]+)$/;
 const INTEGER = /^-?\d+$/;
 const UNLIMITED = /^(?:∞|infinity|unlimited)$/i;
 const EMPTY_LIMIT = /^(?:-|—|–)$/;
+const LIMIT_STATES = new Set(["finite", "unlimited", "unknown"]);
+const REQUEST_PROMO_SUFFIX_RE = /\s+(\d+(?:\.\d+)?)\s*[x×]\s*(?:usage\s*)?(?:(?:[·•|—–-])\s*)?((?:ends?|until|through|expires?)\b.+|limited\s+time\b.*)$/i;
 const PROFILE_RE = /^([^\n]+?)\s*[—–-]\s*([\d,]+)\s+input,\s*([\d,]+)\s+cached,\s*([\d,]+)\s+output\s+tokens\s+per\s+request\s*$/gim;
 const ITEM_START_RE = /<span\b[^>]*\bdata-item(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>/gi;
 const MODEL_ROW_START_RE = /<div\b(?=[^>]*\bdata-slot\s*=\s*(?:"model-row"|'model-row'|model-row))[^>]*>/gi;
@@ -12,9 +14,18 @@ const NAME_RE = /<span\b[^>]*\bdata-name(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>(
 const BONUS_RE = /<span\b[^>]*\bdata-bonus(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>([\s\S]*?)<\/span>/i;
 const MODEL_CELL_RE = /<div\b(?=[^>]*\bdata-slot\s*=\s*(?:"model"|'model'|model))[^>]*>([\s\S]*?)<\/div>/i;
 const REQUESTS_CELL_RE = /<div\b(?=[^>]*\bdata-slot\s*=\s*(?:"requests"|'requests'|requests))[^>]*>([\s\S]*?)<\/div>/i;
+const ALLOWANCE_CELL_RE = /<div\b(?=[^>]*\bdata-slot\s*=\s*(?:"allowance"|'allowance'|allowance))[^>]*>([\s\S]*?)<\/div>/i;
+const STRIKE_RE = /<s\b[^>]*>([\s\S]*?)<\/s>/i;
 const BDI_RE = /<bdi\b[^>]*>([\s\S]*?)<\/bdi>/gi;
 const BADGE_RE = /<span\b(?=[^>]*\bdata-slot\s*=\s*(?:"badge"|'badge'|badge))[^>]*>([\s\S]*?)<\/span>/gi;
-const GRAPH_MARKER_RE = /\bdata-component\s*=\s*["'](?:limit-graph|go-usage)["']/i;
+const ANCHOR_TAG_RE = /<a\b[^>]*>/gi;
+const HREF_RE = /\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i;
+const CURRENT_REGION_SLOT_RE = /\bdata-slot\s*=\s*(?:"region"|'region'|region)(?:\s|>|$)/i;
+const LEGACY_REGION_MARKER_RE = /\bdata-regions(?:\s|=|>|$)/i;
+const GRAPH_MARKER_RE = /\bdata-component\s*=\s*["'](?:limit-graph|go-usage|go-plan-chart)["']/i;
+const PLAN_CHART_ROW_RE = /<tr\b[^>]*>\s*<th\b(?=[^>]*\bscope\s*=\s*["']row["'])[^>]*>[\s\S]*?<\/tr>/gi;
+const PLAN_NUMBER_CELL_RE = /<td\b(?=[^>]*\bdata-slot\s*=\s*["']number["'])[^>]*>([\s\S]*?)<\/td>/gi;
+const PLAN_SCALAR_RE = /<span\b[^>]*>([\s\S]*?)<\/span>/gi;
 const PROMO_TEXT_RE = /usage\s+limits?/i;
 const LIMITED_TIME_RE = /limited\s+time/i;
 const MAX_PROMO_PREFIX = 96_000;
@@ -39,12 +50,86 @@ export function parseMoney(value) {
   return match ? Number(match[1]) : null;
 }
 
+function parseEffectiveMoney(value) {
+  const exact = parseMoney(value);
+  if (exact != null) return exact;
+  const source = compactScalar(value);
+  const matches = [...source.matchAll(/\$\s*([\d,.]+)/g)];
+  if (!matches.length) return null;
+  const parsed = Number(matches.at(-1)[1].replaceAll(",", ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function parseRequestLimit(value) {
   const source = compactScalar(value);
-  if (UNLIMITED.test(source)) return { value: null, unlimited: true, empty: false };
-  if (!source || EMPTY_LIMIT.test(source)) return { value: null, unlimited: false, empty: true };
+  if (UNLIMITED.test(source)) return { kind: "unlimited", value: null };
+  if (!source || EMPTY_LIMIT.test(source)) return { kind: "empty", value: null };
   const parsed = parseInteger(source);
-  return { value: parsed, unlimited: false, empty: parsed == null };
+  if (parsed != null) return { kind: "finite", value: parsed };
+  // Promotional docs cells can contain a struck-through baseline followed by the
+  // effective request count. After HTML text extraction that becomes two numeric
+  // tokens (for example "6,500 26,000"). Accept only an all-numeric sequence and
+  // use the final value, matching the rendered effective value without guessing
+  // from arbitrary prose.
+  if (/^[\d,]+(?:\s+[\d,]+)+$/.test(source)) {
+    const effective = parseInteger(source.split(/\s+/).at(-1));
+    if (effective != null) return { kind: "finite", value: effective };
+  }
+  return { kind: "invalid", value: null, raw: source };
+}
+
+/**
+ * Semantic allowance state with backward compatibility for stored snapshots that
+ * predate the explicit state field. New parsers always emit limitState directly.
+ */
+export function limitStateOf(row) {
+  if (LIMIT_STATES.has(row?.limitState)) return row.limitState;
+  if (row?.unlimited === true) return "unlimited";
+  if ([row?.requests5h, row?.requestsWeek, row?.requestsMonth].some((value) => Number.isFinite(value))) return "finite";
+  return "unknown";
+}
+
+function hasExplicitUnlimitedEvidence(row, source) {
+  if (limitStateOf(row) !== "unlimited") return false;
+  if (source === "chart") return ["chart_data_infinite", "chart_explicit_text", "chart_marker_and_text"].includes(row?.limitEvidence);
+  if (source === "docs") return row?.limitEvidence === "docs_explicit_unlimited";
+  return false;
+}
+
+/**
+ * Combine chart/docs evidence without allowing one source to silently erase a
+ * contradiction in the other. "quota_exempt" means the public Go allowance
+ * surface explicitly establishes exemption; it is deliberately not synonymous
+ * with free service or absence of a separate provider/API rate limit.
+ */
+export function assessGoAllowanceState(chart, doc) {
+  const chartPresent = Boolean(chart);
+  const docsPresent = Boolean(doc);
+  const rawChartState = chartPresent ? limitStateOf(chart) : "absent";
+  const rawDocsState = docsPresent ? limitStateOf(doc) : "absent";
+  // Legacy snapshots only carried a boolean and may have derived it from weak
+  // evidence such as three dashes. Never let that historical boolean satisfy the
+  // modern explicit-evidence gate.
+  const chartState = rawChartState === "unlimited" && !hasExplicitUnlimitedEvidence(chart, "chart") ? "unknown" : rawChartState;
+  const docsState = rawDocsState === "unlimited" && !hasExplicitUnlimitedEvidence(doc, "docs") ? "unknown" : rawDocsState;
+  const evidence = [chart?.limitEvidence, doc?.limitEvidence].filter(Boolean);
+
+  if (chartState === "unlimited" && docsState === "finite" || chartState === "finite" && docsState === "unlimited") {
+    return { state: "conflict", confidence: "low", chartState, docsState, evidence };
+  }
+  if (chartState === "unlimited" && docsState === "unlimited") {
+    return { state: "quota_exempt", confidence: "high", chartState, docsState, evidence };
+  }
+  if (chartState === "unlimited" || docsState === "unlimited") {
+    return { state: "quota_exempt", confidence: "medium", chartState, docsState, evidence };
+  }
+  if (chartState === "finite" && docsState === "finite") {
+    return { state: "finite", confidence: "high", chartState, docsState, evidence };
+  }
+  if (chartState === "finite" || docsState === "finite") {
+    return { state: "finite", confidence: "medium", chartState, docsState, evidence };
+  }
+  return { state: "unknown", confidence: "low", chartState, docsState, evidence };
 }
 
 function canonicalHeader(value) {
@@ -95,21 +180,72 @@ function rowsToRequestMap(rows) {
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row[model]) continue;
+    const promotion = parseRequestPromotion(row[model]);
+    const name = promotion.name;
+    if (!name) continue;
+    if (Object.prototype.hasOwnProperty.call(out, name)) {
+      throw new Error(`Docs request table contains duplicate stable model identity ${JSON.stringify(name)} after promotion normalization`);
+    }
     const five = parseRequestLimit(row[fiveHour]);
     const week = parseRequestLimit(row[weekly]);
     const month = parseRequestLimit(row[monthly]);
-    const explicitUnlimited = five.unlimited || week.unlimited || month.unlimited;
-    // OpenCode currently represents Go models that sit outside the dollar quota as
-    // ∞ on the landing chart but '-' across all request-count cells in the docs.
-    // Preserve that row instead of dropping it. We only infer quota exemption from
-    // an all-empty row; this does NOT imply absence of a separate free-model rate limit.
-    const quotaExempt = explicitUnlimited || (five.empty && week.empty && month.empty);
-    if (quotaExempt) {
-      out[row[model]] = { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true };
+    const cells = [five, week, month];
+    const invalid = cells.find((cell) => cell.kind === "invalid");
+    if (invalid) throw new Error(`Docs request row ${JSON.stringify(name)} contains an unrecognized limit value: ${JSON.stringify(invalid.raw)}`);
+
+    const finiteCount = cells.filter((cell) => cell.kind === "finite").length;
+    const unlimitedCount = cells.filter((cell) => cell.kind === "unlimited").length;
+    const emptyCount = cells.filter((cell) => cell.kind === "empty").length;
+
+    if (finiteCount === 3) {
+      out[name] = {
+        requests5h: five.value,
+        requestsWeek: week.value,
+        requestsMonth: month.value,
+        promotionMultiplier: promotion.multiplier,
+        promotionTiming: promotion.timing,
+        limitState: "finite",
+        limitEvidence: "docs_numeric",
+        unlimited: false,
+      };
       continue;
     }
-    if (five.value == null || week.value == null || month.value == null) continue;
-    out[row[model]] = { requests5h: five.value, requestsWeek: week.value, requestsMonth: month.value, unlimited: false };
+
+    // An explicit infinity/unlimited token is strong semantic evidence, but only
+    // when the other windows do not contradict it with finite values. Empty cells
+    // may accompany that explicit signal in historical representations.
+    if (unlimitedCount > 0 && finiteCount === 0 && unlimitedCount + emptyCount === 3) {
+      out[name] = {
+        requests5h: null,
+        requestsWeek: null,
+        requestsMonth: null,
+        promotionMultiplier: promotion.multiplier,
+        promotionTiming: promotion.timing,
+        limitState: "unlimited",
+        limitEvidence: "docs_explicit_unlimited",
+        unlimited: true,
+      };
+      continue;
+    }
+
+    // Three dashes/blanks are absence of numeric evidence, not proof of infinity.
+    // Preserve the model as unknown so a historical/future empty row cannot be
+    // upgraded into "unlimited" merely because parsing lost all three numbers.
+    if (emptyCount === 3) {
+      out[name] = {
+        requests5h: null,
+        requestsWeek: null,
+        requestsMonth: null,
+        promotionMultiplier: promotion.multiplier,
+        promotionTiming: promotion.timing,
+        limitState: "unknown",
+        limitEvidence: "docs_empty_row",
+        unlimited: false,
+      };
+      continue;
+    }
+
+    throw new Error(`Docs request row ${JSON.stringify(name)} mixes finite, unlimited, and/or empty limit states; refusing to infer a quota mode`);
   }
   return out;
 }
@@ -132,7 +268,9 @@ function rowsToPricingMap(rows) {
       outputPerM: parseMoney(row[output]),
       cachedReadPerM: parseMoney(row[cachedRead]),
       cachedWritePerM: cachedWrite < 0 ? null : parseMoney(row[cachedWrite]),
-      usageUsd: parseMoney(row[usage]),
+      // Monthly-limit cells may show a struck baseline, effective dollar value,
+      // and promotion annotation. The last currency token is the rendered value.
+      usageUsd: parseEffectiveMoney(row[usage]),
     };
   }
   return out;
@@ -174,11 +312,42 @@ function parseLimits(sectionText) {
 }
 
 export function canonicalModelKey(value) {
-  return normalizeSpace(value)
+  return normalizeRequestModelName(value)
     .replace(/\([^)]*\)\s*$/g, "")
     .replace(/\bcode\b\s*$/i, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "");
+}
+
+/**
+ * Strip a temporary promotion annotation from a request-table model label without
+ * changing the stable model entity. OpenCode currently renders annotations through
+ * nested <small> markup which table text extraction intentionally flattens.
+ *
+ * The rule is structural/semantic rather than model-specific: a multiplier only
+ * becomes decoration when it is followed by an explicit finite promotion marker.
+ * Names such as "Model 4x Large" therefore remain untouched.
+ */
+export function normalizeRequestModelName(value) {
+  return parseRequestPromotion(value).name;
+}
+
+/**
+ * Parse temporary request-table promotion decoration without folding it into the
+ * stable model identity. The semantic timing text is retained so a deadline move
+ * such as "Ends Sep 20" → "Ends Sep 27" becomes a promotion update rather than a
+ * remove/add pair or generic prose churn.
+ */
+export function parseRequestPromotion(value) {
+  const source = normalizeSpace(value);
+  const match = REQUEST_PROMO_SUFFIX_RE.exec(source);
+  if (!match) return { name: source, multiplier: null, timing: null };
+  const multiplier = Number(match[1]);
+  return {
+    name: source.slice(0, match.index).trim(),
+    multiplier: Number.isFinite(multiplier) ? multiplier : null,
+    timing: normalizeSpace(match[2]),
+  };
 }
 
 function requestNameIndex(requestNames) {
@@ -253,6 +422,78 @@ function normalizeChartName(rawName, explicitBonus) {
   return { name, bonus };
 }
 
+function strikeScalar(fragment, parser) {
+  const struck = STRIKE_RE.exec(String(fragment ?? ""));
+  return struck ? parser(textContent(struck[1])) : null;
+}
+
+function lastBdiScalar(fragment, parser) {
+  BDI_RE.lastIndex = 0;
+  let value = null;
+  let match;
+  while ((match = BDI_RE.exec(String(fragment ?? ""))) !== null) {
+    const parsed = parser(textContent(match[1]));
+    if (parsed != null) value = parsed;
+  }
+  return value;
+}
+
+function regionUrl(fragment) {
+  const source = String(fragment ?? "");
+  ANCHOR_TAG_RE.lastIndex = 0;
+  let anchor;
+  while ((anchor = ANCHOR_TAG_RE.exec(source)) !== null) {
+    if (!CURRENT_REGION_SLOT_RE.test(anchor[0]) && !LEGACY_REGION_MARKER_RE.test(anchor[0])) continue;
+    const href = HREF_RE.exec(anchor[0]);
+    if (href) return normalizeSpace(href[1] ?? href[2] ?? href[3]);
+  }
+  // The Go/Go Plus comparison puts the policy link inside the model's label
+  // cell without the historical data-slot/data-regions marker. The link text
+  // must itself establish the semantic role; do not capture unrelated links.
+  const policy = /<a\b([^>]*)>\s*limited\s+regions\s*<\/a>/i.exec(source);
+  if (policy) {
+    const href = HREF_RE.exec(policy[1]);
+    if (href) return normalizeSpace(href[1] ?? href[2] ?? href[3]);
+  }
+  // Historical markup put data-regions on a wrapper and the href on its child.
+  if (LEGACY_REGION_MARKER_RE.test(source)) {
+    const href = HREF_RE.exec(source);
+    if (href) return normalizeSpace(href[1] ?? href[2] ?? href[3]);
+  }
+  return null;
+}
+
+function chartRow({ requests5h, bonus = null, limitState, limitEvidence, baseRequests5h = null, monthlyAllowanceUsd = null, baseMonthlyAllowanceUsd = null, region = null }) {
+  const state = limitState ?? (Number.isFinite(requests5h) ? "finite" : "unknown");
+  return {
+    requests5h,
+    baseRequests5h,
+    monthlyAllowanceUsd,
+    baseMonthlyAllowanceUsd,
+    bonus,
+    regionUrl: region,
+    limitState: state,
+    limitEvidence: limitEvidence ?? (state === "finite" ? "chart_numeric" : null),
+    unlimited: state === "unlimited",
+  };
+}
+
+function chartLimitState({ tag = "", valueText = "", parsedValue = null, context = "Go chart row" }) {
+  const marker = /\bdata-infinite(?:\s|=|>)/i.test(tag);
+  const explicitText = UNLIMITED.test(compactScalar(valueText));
+  if ((marker || explicitText) && parsedValue != null) {
+    throw new Error(`${context} contains both explicit unlimited evidence and a finite request value`);
+  }
+  if (marker || explicitText) {
+    return {
+      limitState: "unlimited",
+      limitEvidence: marker && explicitText ? "chart_marker_and_text" : marker ? "chart_data_infinite" : "chart_explicit_text",
+    };
+  }
+  if (parsedValue != null) return { limitState: "finite", limitEvidence: "chart_numeric" };
+  return { limitState: "unknown", limitEvidence: "chart_unparsed" };
+}
+
 function parsePromoBannerText(pageText) {
   const source = String(pageText ?? "");
   const lines = source.split("\n");
@@ -294,6 +535,8 @@ function monitoredRanges(chartHtml) {
   let match;
   while ((match = ITEM_START_RE.exec(chartHtml)) !== null) starts.push({ index: match.index, tagName: "span" });
   while ((match = MODEL_ROW_START_RE.exec(chartHtml)) !== null) starts.push({ index: match.index, tagName: "div" });
+  PLAN_CHART_ROW_RE.lastIndex = 0;
+  while ((match = PLAN_CHART_ROW_RE.exec(chartHtml)) !== null) starts.push({ index: match.index, tagName: "tr" });
   starts.sort((a, b) => a.index - b.index);
   return starts
     .map(({ index, tagName }) => [index, balancedElementEnd(chartHtml, index, tagName)])
@@ -346,6 +589,62 @@ export function prepareGoPage(html) {
 export function parsePreparedGoPage(prepared) {
   const chart = {};
 
+  // Go/Go Plus comparison tables are explicitly two-tier. The first scalar
+  // belongs to Go and the second to Go Plus, matching the named legend and
+  // ordered lanes. Never flatten both numbers into one value or infer that a
+  // visually empty/dash cell means unlimited.
+  if (/\bdata-component\s*=\s*["']go-plan-chart["']/i.test(prepared.chartHtml)) {
+    if (!/\bdata-tier\s*=\s*["']go["']/i.test(prepared.chartHtml) || !/\bdata-tier\s*=\s*["']plus["']/i.test(prepared.chartHtml)) {
+      throw new Error("Go plan chart lacks explicit Go and Go Plus tier evidence");
+    }
+    PLAN_CHART_ROW_RE.lastIndex = 0;
+    let match;
+    while ((match = PLAN_CHART_ROW_RE.exec(prepared.chartHtml)) !== null) {
+      const segment = match[0];
+      const modelCell = /<th\b[^>]*>([\s\S]*?)<\/th>/i.exec(segment)?.[1] ?? "";
+      BDI_RE.lastIndex = 0;
+      const name = normalizeSpace(textContent(BDI_RE.exec(modelCell)?.[1] ?? ""));
+      if (!name) throw new Error("Go plan chart has a row with no model name");
+
+      PLAN_NUMBER_CELL_RE.lastIndex = 0;
+      const cells = [...segment.matchAll(PLAN_NUMBER_CELL_RE)].map((cell) => {
+        PLAN_SCALAR_RE.lastIndex = 0;
+        return [...cell[1].matchAll(PLAN_SCALAR_RE)].map((value) => normalizeSpace(textContent(value[1])));
+      });
+      if (cells.length !== 2 || cells.some((values) => values.length !== 2)) {
+        throw new Error(`Go plan chart row ${JSON.stringify(name)} lacks two paired numeric cells`);
+      }
+      const [goRequests, plusRequests] = cells[0].map(parseRequestLimit);
+      const [goAllowance, plusAllowance] = cells[1];
+      if ([goRequests, plusRequests].some((value) => !["finite", "unlimited"].includes(value.kind))) {
+        throw new Error(`Go plan chart row ${JSON.stringify(name)} has an invalid or unknown quota state`);
+      }
+      const allowances = [goAllowance, plusAllowance].map((value) => UNLIMITED.test(value) ? null : parseMoney(value));
+      if ([goAllowance, plusAllowance].some((value, index) => !UNLIMITED.test(value) && allowances[index] == null)) {
+        throw new Error(`Go plan chart row ${JSON.stringify(name)} has an invalid monthly allowance`);
+      }
+      if ([goRequests, plusRequests].some((value, index) => (value.kind === "unlimited") !== UNLIMITED.test(cells[1][index]))) {
+        throw new Error(`Go plan chart row ${JSON.stringify(name)} has conflicting request and monthly allowance states`);
+      }
+      if (Object.hasOwn(chart, name)) throw new Error(`Go plan chart has duplicate model ${JSON.stringify(name)}`);
+      chart[name] = {
+        ...chartRow({
+          requests5h: goRequests.value,
+          monthlyAllowanceUsd: allowances[0],
+          region: regionUrl(modelCell),
+          limitState: goRequests.kind,
+          limitEvidence: goRequests.kind === "unlimited" ? "chart_explicit_text" : "chart_numeric",
+        }),
+        plusRequests5h: plusRequests.value,
+        plusMonthlyAllowanceUsd: allowances[1],
+        plusLimitState: plusRequests.kind,
+        plusLimitEvidence: plusRequests.kind === "unlimited" ? "chart_explicit_text" : "chart_numeric",
+      };
+    }
+    if (!Object.keys(chart).length) throw new Error("Go plan chart has no model rows");
+    return { chart, promoBanner: prepared.promoBanner, monitorStructure: prepared.monitorStructure };
+  }
+
   // Current Go markup uses an ARIA table with model-row/data-slot semantics rather
   // than the historical limit-graph span pills. Parse by stable semantic slots and
   // keep the old representation below for snapshot/history compatibility.
@@ -363,15 +662,14 @@ export function parsePreparedGoPage(prepared) {
     const name = nameMatch ? normalizeSpace(textContent(nameMatch[1])) : "";
 
     const requestsCell = REQUESTS_CELL_RE.exec(segment)?.[1] ?? "";
-    BDI_RE.lastIndex = 0;
-    let requests5h = null;
-    let requestValue;
-    while ((requestValue = BDI_RE.exec(requestsCell)) !== null) {
-      const parsed = parseInteger(textContent(requestValue[1]));
-      if (parsed != null) requests5h = parsed;
-    }
-    const explicitInfinite = /\bdata-infinite(?:\s|=|>)/i.test(modelRows[i].tag)
-      || UNLIMITED.test(compactScalar(textContent(requestsCell)));
+    const requests5h = lastBdiScalar(requestsCell, parseInteger);
+    const baseRequests5h = strikeScalar(requestsCell, parseInteger);
+    const requestText = textContent(requestsCell);
+    const limit = chartLimitState({ tag: modelRows[i].tag, valueText: requestText, parsedValue: requests5h, context: `Go chart row ${JSON.stringify(name || "unknown")}` });
+
+    const allowanceCell = ALLOWANCE_CELL_RE.exec(segment)?.[1] ?? "";
+    const monthlyAllowanceUsd = lastBdiScalar(allowanceCell, parseMoney);
+    const baseMonthlyAllowanceUsd = strikeScalar(allowanceCell, parseMoney);
 
     let bonus = null;
     BADGE_RE.lastIndex = 0;
@@ -383,8 +681,17 @@ export function parsePreparedGoPage(prepared) {
         break;
       }
     }
-    if (name && (explicitInfinite || requests5h != null)) {
-      chart[name] = { requests5h: explicitInfinite ? null : requests5h, bonus, unlimited: explicitInfinite };
+    if (name && limit.limitState === "unknown") throw new Error(`Go chart row ${JSON.stringify(name)} has no parseable finite or explicit unlimited request state`);
+    if (name) {
+      chart[name] = chartRow({
+        requests5h: limit.limitState === "unlimited" ? null : requests5h,
+        baseRequests5h,
+        monthlyAllowanceUsd,
+        baseMonthlyAllowanceUsd,
+        bonus,
+        region: regionUrl(modelCell),
+        ...limit,
+      });
     }
   }
 
@@ -401,11 +708,13 @@ export function parsePreparedGoPage(prepared) {
     if (!nameMatch) continue;
     const bonusMatch = BONUS_RE.exec(segment);
     const valueText = valueMatch ? textContent(valueMatch[1]) : "";
-    const explicitInfinite = /\bdata-infinite(?:\s|=|>)/i.test(starts[i].tag) || UNLIMITED.test(compactScalar(valueText));
-    const requests5h = explicitInfinite ? null : parseInteger(valueText);
+    const parsedRequests = parseInteger(valueText);
+    const limit = chartLimitState({ tag: starts[i].tag, valueText, parsedValue: parsedRequests, context: `Legacy Go chart row ${JSON.stringify(textContent(nameMatch[1]))}` });
+    const requests5h = limit.limitState === "unlimited" ? null : parsedRequests;
     const normalized = normalizeChartName(textContent(nameMatch[1]), bonusMatch ? textContent(bonusMatch[1]) : null);
-    if (normalized.name && (explicitInfinite || requests5h != null)) {
-      chart[normalized.name] = { requests5h, bonus: normalized.bonus, unlimited: explicitInfinite };
+    if (normalized.name && limit.limitState === "unknown") throw new Error(`Legacy Go chart row ${JSON.stringify(normalized.name)} has no parseable finite or explicit unlimited request state`);
+    if (normalized.name) {
+      chart[normalized.name] = chartRow({ requests5h, bonus: normalized.bonus, region: regionUrl(segment), ...limit });
     }
   }
 
@@ -418,16 +727,17 @@ export function parsePreparedGoPage(prepared) {
     const rowPattern = /([\d,]+|∞)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9().×x-]+){0,8}?)(?=\s+(?:[\d,]+|∞)\s+[A-Z]|\s+\d+(?:\.\d+)?[x×]\s+usage|\s+Requests per 5 hour)/g;
     let row;
     while ((row = rowPattern.exec(region)) !== null) {
-      const explicitInfinite = UNLIMITED.test(compactScalar(row[1]));
-      const requests5h = explicitInfinite ? null : parseInteger(row[1]);
+      const parsedRequests = parseInteger(row[1]);
+      const limit = chartLimitState({ valueText: row[1], parsedValue: parsedRequests, context: `Text-fallback Go chart row ${JSON.stringify(row[2])}` });
+      const requests5h = limit.limitState === "unlimited" ? null : parsedRequests;
       const normalized = normalizeChartName(row[2], null);
-      if (normalized.name && (explicitInfinite || requests5h != null)) chart[normalized.name] = { requests5h, bonus: normalized.bonus, unlimited: explicitInfinite };
+      if (normalized.name && limit.limitState !== "unknown") chart[normalized.name] = chartRow({ requests5h, bonus: normalized.bonus, ...limit });
     }
     const bonusMatch = /([\d,]+)\s+([A-Z][A-Za-z0-9.-]*(?:\s+[A-Za-z0-9.-]+){0,8})\s+(\d+(?:\.\d+)?[x×]\s+usage)/i.exec(region);
     if (bonusMatch) {
       const requests5h = parseInteger(bonusMatch[1]);
       const normalized = normalizeChartName(bonusMatch[2], bonusMatch[3]);
-      if (requests5h != null) chart[normalized.name] = { requests5h, bonus: normalized.bonus, unlimited: false };
+      if (requests5h != null) chart[normalized.name] = chartRow({ requests5h, bonus: normalized.bonus, limitState: "finite", limitEvidence: "chart_numeric" });
     }
   }
 
@@ -465,6 +775,8 @@ export function parsePreparedDocsPage(prepared) {
   const tables = extractHtmlTables(prepared.usageHtml);
   const requestTable = findTable(tables, ["model", "requests per 5 hour", "requests per week", "requests per month"]);
   const pricingTable = findTable(tables, ["model", "input", "output", "cached read", ["usage", "monthly limit", "monthly usage", "included usage"]]);
+  const allRequestTables = tables.filter((rows) => rows[0] && headerIndex(rows[0], "model") >= 0 && headerIndex(rows[0], "requests per 5 hour") >= 0 && headerIndex(rows[0], "requests per week") >= 0 && headerIndex(rows[0], "requests per month") >= 0);
+  const allPricingTables = tables.filter((rows) => rows[0] && headerIndex(rows[0], "model") >= 0 && headerIndex(rows[0], "input") >= 0 && headerIndex(rows[0], "output") >= 0 && headerIndex(rows[0], "cached read") >= 0 && headerIndex(rows[0], ["usage", "monthly limit", "monthly usage", "included usage"]) >= 0);
 
   if (!requestTable) throw new Error("Docs parser could not find request-count table");
   if (!pricingTable) throw new Error("Docs parser could not find pricing table");
@@ -472,6 +784,11 @@ export function parsePreparedDocsPage(prepared) {
   const limits = parseLimits(usageText);
   const requests = rowsToRequestMap(requestTable);
   const pricing = rowsToPricingMap(pricingTable);
+  // The docs render both tab bodies into SSR. Preserve the independently
+  // published Go Plus allowances instead of silently discarding the second
+  // table. Historical single-plan documents keep the fields absent.
+  const requestsPlus = allRequestTables.length >= 2 ? rowsToRequestMap(allRequestTables[1]) : null;
+  const pricingPlus = allPricingTables.length >= 2 ? rowsToPricingMap(allPricingTables[1]) : null;
   const profiles = parseProfiles(usageText, Object.keys(requests));
   const notes = extractUsageNotes(usageText);
 
@@ -484,6 +801,8 @@ export function parsePreparedDocsPage(prepared) {
     limits,
     requests,
     pricing,
+    ...(requestsPlus ? { requestsPlus } : {}),
+    ...(pricingPlus ? { pricingPlus } : {}),
     profiles,
     notes,
     usageText: usageText.replace(/\s+/g, " ").trim(),
@@ -516,15 +835,21 @@ export function deriveConsistency(go, docs) {
   for (const [name, chart] of Object.entries(go.chart ?? {})) {
     const doc = docs.requests?.[name];
     if (!doc) {
-      out[name] = { status: "chart_only", chart: chart.requests5h, docs: null, unlimited: Boolean(chart.unlimited) };
+      out[name] = { status: "chart_only", chart: chart.requests5h, docs: null, chartLimitState: limitStateOf(chart) };
       continue;
     }
-    if (Boolean(chart.unlimited) && Boolean(doc.unlimited)) {
-      out[name] = { status: "match", chart: null, docs: null, unlimited: true };
+    const allowance = assessGoAllowanceState(chart, doc);
+    if (allowance.state === "conflict") {
+      out[name] = { status: "mismatch", chart: chart.requests5h, docs: doc.requests5h, chartLimitState: allowance.chartState, docsLimitState: allowance.docsState };
       continue;
     }
-    if (Boolean(chart.unlimited) !== Boolean(doc.unlimited)) {
-      out[name] = { status: "mismatch", chart: chart.requests5h, docs: doc.requests5h, chartUnlimited: Boolean(chart.unlimited), docsUnlimited: Boolean(doc.unlimited) };
+    if (allowance.state === "quota_exempt") {
+      if (allowance.confidence === "high") out[name] = { status: "match", chart: null, docs: null, limitState: "unlimited" };
+      else out[name] = { status: "uncertain", chart: chart.requests5h, docs: doc.requests5h, chartLimitState: allowance.chartState, docsLimitState: allowance.docsState };
+      continue;
+    }
+    if (allowance.state === "unknown" || allowance.chartState === "unknown" || allowance.docsState === "unknown") {
+      out[name] = { status: "uncertain", chart: chart.requests5h, docs: doc.requests5h, chartLimitState: allowance.chartState, docsLimitState: allowance.docsState };
       continue;
     }
     if (chart.requests5h === doc.requests5h) {

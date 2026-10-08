@@ -33,7 +33,7 @@ function dashboardSnapshot() {
         "GPT 5.6 Luna": { requests5h: 2050, requestsWeek: 5100, requestsMonth: 10250 },
         "DeepSeek V4 Flash": { requests5h: 7600, requestsWeek: 18900, requestsMonth: 37800 },
         "Qwen3.7 Plus": { requests5h: 4300, requestsWeek: 10800, requestsMonth: 21600 },
-        Hy3: { requests5h: 4300, requestsWeek: 10750, requestsMonth: 21500 },
+        Hy3: { requests5h: 34400, requestsWeek: 86000, requestsMonth: 172000 },
         "GLM-5.3": { requests5h: 220, requestsWeek: 540, requestsMonth: 1080 },
       },
       pricing: {
@@ -57,7 +57,7 @@ function dashboardSnapshot() {
       chart: {
         "GPT 5.6 Luna": { requests5h: 2050, bonus: null },
         "DeepSeek V4 Flash": { requests5h: 7600, bonus: null },
-        Hy3: { requests5h: 34400, bonus: "8x usage" },
+        Hy3: { requests5h: 34400, baseRequests5h: 4300, monthlyAllowanceUsd: 60, baseMonthlyAllowanceUsd: 7.5, bonus: "8x usage" },
       },
       promoBanner: "Hy3 gets 8× usage limits for a limited time",
     },
@@ -74,7 +74,7 @@ test("public root renders the responsive status dashboard", async () => {
   assert.match(body, /go\/watch/);
   assert.match(body, /dashboard\.js/);
   assert.match(body, /Last persisted heartbeat/);
-  assert.match(body, /Checks run every 1m/);
+  assert.match(body, /Checks run every 10m/);
   assert.match(body, /@media\(max-width:780px\)/);
   assert.match(body, /@media\(max-width:520px\)/);
   assert.doesNotMatch(body, /secret-admin|TOKEN/);
@@ -111,6 +111,9 @@ test("live dashboard renders every docs model, maker logos, pricing tiers and De
   assert.match(body, /models\.dev\/logos\/labs\/tencent\.svg/);
 
   assert.match(body, /8x promo/);
+  assert.match(body, /base 5h 4\.3K/);
+  assert.match(body, /\$7\.50 → \$60\.00 monthly/);
+  assert.match(body, /chart base \$7\.50 → current \$60\.00/);
   assert.match(body, /Off-Peak: in \$0\.22/);
   assert.match(body, /Peak: in \$0\.44/);
   assert.match(body, /included credit Δ 0%/);
@@ -147,6 +150,7 @@ test("root renders bounded raw-JSON historical Telegram alerts above the all-mod
   const body = await response.text();
   assert.match(body, /Historical Telegram alerts/);
   assert.match(body, /Actual actionable bot events only/);
+  assert.match(body, /raw-JSON KV value with legacy Brotli read compatibility/);
   assert.match(body, /PRICING UPDATE/);
   assert.match(body, /96-event rolling cap/);
   assert(body.indexOf('id="alerts"') < body.indexOf('id="chart"'), "alert carousel should render above the bar chart");

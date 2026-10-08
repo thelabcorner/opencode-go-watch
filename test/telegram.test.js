@@ -25,20 +25,36 @@ test("renders rich grouped change cards with deltas", () => {
   assert.ok(messages[0].length < 4096);
 });
 
-test("renders routing identifier replacements as a dedicated Go model ID card", () => {
+test("renders landing data-model replacements as chart IDs without implying API routing", () => {
   const messages = buildChangeMessages([
-    { type: "chart_changed", key: "Ox Alpha", field: "modelId", before: "x-preview-f-free", after: "ox-alpha-free" },
+    { type: "chart_changed", key: "DeepSeek V4.1 Flash", field: "chartId", before: "deepseek-flash", after: "deepseek-v4.1-flash" },
   ], {
     checkedAt: "2026-08-21T09:10:00.000Z",
     docs: { pricing: {}, profiles: {} },
-    go: { chart: { "Ox Alpha": { requests5h: 0, bonus: null } } },
+    go: { chart: { "DeepSeek V4.1 Flash": { requests5h: 26000, bonus: "4x usage" } } },
   });
   assert.equal(messages.length, 1);
-  assert.match(messages[0], /OPENCODE GO · MODEL ID CHANGED/);
-  assert.match(messages[0], /GO MODEL ID CHANGED/);
-  assert.match(messages[0], /Ox Alpha/);
-  assert.match(messages[0], /opencode\/x-preview-f-free → opencode\/ox-alpha-free/);
+  assert.match(messages[0], /OPENCODE GO · CHART ID CHANGED/);
+  assert.match(messages[0], /GO CHART ID CHANGED/);
+  assert.match(messages[0], /DeepSeek V4\.1 Flash/);
+  assert.match(messages[0], /deepseek-flash → deepseek-v4\.1-flash/);
+  assert.doesNotMatch(messages[0], /opencode\//);
   assert.doesNotMatch(messages[0], /UNCLASSIFIED/);
+});
+
+test("renders typed monthly allowance, promotion baseline, and region-policy changes", () => {
+  const messages = buildChangeMessages([
+    { type: "chart_changed", key: "Example", field: "monthlyAllowanceUsd", before: 15, after: 60, percent: 300 },
+    { type: "chart_changed", key: "Example", field: "baseRequests5h", before: 1000, after: 2000, percent: 100 },
+    { type: "chart_changed", key: "Example", field: "regionUrl", before: "https://example.com/a", after: "https://example.com/b" },
+  ], {
+    checkedAt: "2026-09-19T18:30:00.000Z",
+    docs: { pricing: {}, profiles: {} },
+    go: { chart: { Example: { requests5h: 4000 } } },
+  });
+  assert.match(messages[0], /Monthly usage: <code>\$15 → \$60<\/code>/);
+  assert.match(messages[0], /Promo base · 5 hour: <code>1,000 → 2,000<\/code>/);
+  assert.match(messages[0], /Region policy: <code>https:\/\/example\.com\/a → https:\/\/example\.com\/b<\/code>/);
 });
 
 test("new model lifecycle is rendered as one rich model card", () => {

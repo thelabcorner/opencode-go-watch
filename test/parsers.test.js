@@ -2,14 +2,40 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
+  assessGoAllowanceState,
   deriveConsistency,
   expandProfileLabel,
+  normalizeRequestModelName,
+  parseRequestPromotion,
   parseDocsPage,
   parseGoPage,
 } from "../src/parsers.js";
 
 const goHtml = await readFile(new URL("./fixtures/go.html", import.meta.url), "utf8");
 const docsHtml = await readFile(new URL("./fixtures/docs.html", import.meta.url), "utf8");
+
+function chartRow({ requests5h, baseRequests5h = null, monthlyAllowanceUsd = null, baseMonthlyAllowanceUsd = null, bonus = null, regionUrl = null, limitState = Number.isFinite(requests5h) ? "finite" : "unknown", limitEvidence = limitState === "finite" ? "chart_numeric" : null }) {
+  return { requests5h, baseRequests5h, monthlyAllowanceUsd, baseMonthlyAllowanceUsd, bonus, regionUrl, limitState, limitEvidence, unlimited: limitState === "unlimited" };
+}
+
+function docsRequest({ requests5h, requestsWeek, requestsMonth, promotionMultiplier = null, promotionTiming = null, limitState = "finite", limitEvidence = "docs_numeric" }) {
+  return { requests5h, requestsWeek, requestsMonth, promotionMultiplier, promotionTiming, limitState, limitEvidence, unlimited: limitState === "unlimited" };
+}
+
+function docsWithTargetRow(cells) {
+  return `
+    <h2>Usage limits</h2>
+    <p>5 hour limit — $12</p><p>Weekly limit — $30</p><p>Monthly limit — $60</p>
+    <table><tr><th>Model</th><th>requests per 5 hour</th><th>requests per week</th><th>requests per month</th></tr>
+      <tr><td>Target Model</td><td>${cells[0]}</td><td>${cells[1]}</td><td>${cells[2]}</td></tr>
+      <tr><td>Example</td><td>100</td><td>200</td><td>400</td></tr>
+    </table>
+    <p>Example — 100 input, 100 cached, 100 output tokens per request</p>
+    <table><tr><th>Model</th><th>Input</th><th>Output</th><th>Cached Read</th><th>Cached Write</th><th>Usage</th></tr>
+      <tr><td>Target Model</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+      <tr><td>Example</td><td>$1</td><td>$1</td><td>$1</td><td>-</td><td>$15</td></tr>
+    </table>`;
+}
 
 test("parses Go chart and promotion", () => {
   const go = parseGoPage(goHtml);
@@ -37,27 +63,48 @@ test("parses current go-usage table rows and row-scoped promotion badges", () =>
         </div>
       </div>
     </figure>`);
-  assert.deepEqual(go.chart["GLM-5.3-Flash"], { requests5h: 6320, bonus: null, unlimited: false });
-  assert.deepEqual(go.chart["DeepSeek V4.1 Flash"], { requests5h: 26000, bonus: "4x usage", unlimited: false });
+  assert.deepEqual(go.chart["GLM-5.3-Flash"], chartRow({ requests5h: 6320, monthlyAllowanceUsd: 60 }));
+  assert.deepEqual(go.chart["DeepSeek V4.1 Flash"], chartRow({ requests5h: 26000, baseRequests5h: 6500, monthlyAllowanceUsd: 60, baseMonthlyAllowanceUsd: 15, bonus: "4x usage" }));
   assert.match(go.monitorStructure, /data-model="glm-5\.3-flash"/);
   assert.match(go.monitorStructure, /data-model="deepseek-flash"/);
 });
 
 test("current go-usage parser generalizes to an unrelated sibling model", () => {
+  const policy = "https://example.com/regions";
   const go = parseGoPage(`
     <figure data-component="go-usage">
       <div role="row" data-slot="model-row" data-model="future-model">
-        <div role="rowheader" data-slot="model"><bdi>Future Model</bdi><span data-slot="badge">3x usage</span></div>
-        <div role="cell" data-slot="usage-value"><div data-slot="requests"><bdi>9,999</bdi></div></div>
+        <div role="rowheader" data-slot="model"><bdi>Future Model</bdi><span data-slot="badge">3x usage</span><a data-slot="region" href="${policy}">regions</a></div>
+        <div role="cell" data-slot="usage-value"><div data-slot="requests"><s>3,333</s> <bdi>9,999</bdi></div></div>
+        <div role="cell" data-slot="allowance"><s>$12</s> <bdi><span data-slot="currency">$</span> 36</bdi></div>
       </div>
     </figure>`);
-  assert.deepEqual(go.chart["Future Model"], { requests5h: 9999, bonus: "3x usage", unlimited: false });
+  assert.deepEqual(go.chart["Future Model"], chartRow({ requests5h: 9999, baseRequests5h: 3333, monthlyAllowanceUsd: 36, baseMonthlyAllowanceUsd: 12, bonus: "3x usage", regionUrl: policy }));
+});
+
+test("request-table promotion decoration does not fracture stable model identity", () => {
+  const docs = parseDocsPage(`
+    <h2>Usage limits</h2>
+    <p>Each model has the following usage limits: 5-hour — 20% of the monthly limit; weekly — 50%; and monthly — 100%.</p>
+    <table><tr><th>Model</th><th>requests per 5 hour</th><th>requests per week</th><th>requests per month</th></tr>
+      <tr><td>Future Model<br><small>3x · Ends Oct 1</small></td><td><del>100</del><strong>300</strong></td><td><del>250</del><strong>750</strong></td><td><del>500</del><strong>1,500</strong></td></tr>
+    </table>
+    <p>Future Model — 100 input, 200 cached, 300 output tokens per request</p>
+    <table><tr><th>Model</th><th>Input</th><th>Output</th><th>Cached Read</th><th>Cached Write</th><th>Monthly limit</th></tr>
+      <tr><td>Future Model</td><td>$1</td><td>$2</td><td>$0.10</td><td>-</td><td><del>$20</del><strong>$60</strong><small>3x · Ends Oct 1</small></td></tr>
+    </table>`);
+  assert.deepEqual(docs.requests["Future Model"], docsRequest({ requests5h: 300, requestsWeek: 750, requestsMonth: 1500, promotionMultiplier: 3, promotionTiming: "Ends Oct 1" }));
+  assert.equal(docs.requests["Future Model 3x · Ends Oct 1"], undefined);
+  assert.deepEqual(docs.profiles["Future Model"], { inputTokens: 100, cachedTokens: 200, outputTokens: 300 });
+  assert.equal(docs.pricing["Future Model"].usageUsd, 60);
+  assert.equal(normalizeRequestModelName("Model 4x Large"), "Model 4x Large", "multiplier-like text without a finite-promotion marker is part of the name");
+  assert.deepEqual(parseRequestPromotion("DeepSeek V4.1 Flash 4x · Ends Sep 27"), { name: "DeepSeek V4.1 Flash", multiplier: 4, timing: "Ends Sep 27" });
 });
 
 test("parses docs limits, request table, expanded profiles and pricing", () => {
   const docs = parseDocsPage(docsHtml);
   assert.deepEqual(docs.limits, { fiveHourUsd: 12, weeklyUsd: 30, monthlyUsd: 60 });
-  assert.deepEqual(docs.requests["GPT 5.6 Luna"], { requests5h: 2050, requestsWeek: 5100, requestsMonth: 10250, unlimited: false });
+  assert.deepEqual(docs.requests["GPT 5.6 Luna"], docsRequest({ requests5h: 2050, requestsWeek: 5100, requestsMonth: 10250 }));
   assert.equal(docs.profiles["Grok 4.5"].cachedTokens, 71500);
   assert.equal(docs.profiles["GLM-5.3"].cachedTokens, 52000);
   assert.equal(docs.profiles["GLM-5.2"].cachedTokens, 52000);
@@ -81,21 +128,21 @@ test("accepts current Monthly limit pricing and resolves columns by header meani
     <table><tr><th>Model</th><th>Monthly limit</th><th>Cached Write</th><th>Output</th><th>Cached Read</th><th>Input</th></tr>
       <tr><td>Example Model</td><td>$60</td><td>-</td><td>$2</td><td>$0.10</td><td>$1</td></tr>
     </table>`);
-  assert.deepEqual(docs.requests["Example Model"], { requests5h: 100, requestsWeek: 200, requestsMonth: 400, unlimited: false });
+  assert.deepEqual(docs.requests["Example Model"], docsRequest({ requests5h: 100, requestsWeek: 200, requestsMonth: 400 }));
   assert.deepEqual(docs.pricing["Example Model"], { inputPerM: 1, outputPerM: 2, cachedReadPerM: 0.1, cachedWritePerM: null, usageUsd: 60 });
   assert.deepEqual(docs.limits, { fiveHourUsd: 12, weeklyUsd: 30, monthlyUsd: 60 });
   assert.match(docs.notes.deepSeekPeakHours, /DeepSeek V4\.1 Flash/);
   assert.match(docs.notes.deepSeekPeakHours, /Peak hours are 01:00-04:00/);
 });
 
-test("parses infinite Go chart entries and dash-only docs rows as quota-exempt", () => {
+test("explicit chart infinity is preserved while dash-only docs remain unknown", () => {
   const go = parseGoPage(`
     <figure data-component="limit-graph">
       <span data-item data-kind="go" data-model="ox-alpha-free" data-infinite>
         <span data-name>Ox Alpha Free</span>
       </span>
     </figure>`);
-  assert.deepEqual(go.chart["Ox Alpha Free"], { requests5h: null, bonus: null, unlimited: true });
+  assert.deepEqual(go.chart["Ox Alpha Free"], chartRow({ requests5h: null, limitState: "unlimited", limitEvidence: "chart_data_infinite" }));
 
   const docs = parseDocsPage(`
     <h2>Usage limits</h2>
@@ -109,8 +156,77 @@ test("parses infinite Go chart entries and dash-only docs rows as quota-exempt",
       <tr><td>Ox Alpha Free</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
       <tr><td>Example</td><td>$1</td><td>$1</td><td>$1</td><td>-</td><td>$15</td></tr>
     </table>`);
-  assert.deepEqual(docs.requests["Ox Alpha Free"], { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true });
-  assert.deepEqual(deriveConsistency(go, docs)["Ox Alpha Free"], { status: "match", chart: null, docs: null, unlimited: true });
+  assert.deepEqual(docs.requests["Ox Alpha Free"], docsRequest({ requests5h: null, requestsWeek: null, requestsMonth: null, limitState: "unknown", limitEvidence: "docs_empty_row" }));
+  assert.deepEqual(deriveConsistency(go, docs)["Ox Alpha Free"], {
+    status: "uncertain",
+    chart: null,
+    docs: null,
+    chartLimitState: "unlimited",
+    docsLimitState: "unknown",
+  });
+  assert.deepEqual(assessGoAllowanceState(go.chart["Ox Alpha Free"], docs.requests["Ox Alpha Free"]), {
+    state: "quota_exempt",
+    confidence: "medium",
+    chartState: "unlimited",
+    docsState: "unknown",
+    evidence: ["chart_data_infinite", "docs_empty_row"],
+  });
+});
+
+test("explicit unlimited docs tokens are quota evidence but dashes alone never are", () => {
+  const explicit = parseDocsPage(docsWithTargetRow(["∞", "—", "-"]));
+  assert.deepEqual(explicit.requests["Target Model"], docsRequest({
+    requests5h: null,
+    requestsWeek: null,
+    requestsMonth: null,
+    limitState: "unlimited",
+    limitEvidence: "docs_explicit_unlimited",
+  }));
+
+  const empty = parseDocsPage(docsWithTargetRow(["-", "—", "-"]));
+  assert.deepEqual(empty.requests["Target Model"], docsRequest({
+    requests5h: null,
+    requestsWeek: null,
+    requestsMonth: null,
+    limitState: "unknown",
+    limitEvidence: "docs_empty_row",
+  }));
+});
+
+test("unrecognized or contradictory docs request rows fail closed instead of becoming unlimited", () => {
+  assert.throws(() => parseDocsPage(docsWithTargetRow(["N/A", "N/A", "N/A"])), /unrecognized limit value/i);
+  assert.throws(() => parseDocsPage(docsWithTargetRow(["∞", "200", "-"])), /mixes finite, unlimited, and\/or empty/i);
+});
+
+test("chart infinity evidence cannot coexist with a finite request number", () => {
+  assert.throws(() => parseGoPage(`
+    <figure data-component="go-usage">
+      <div role="row" data-slot="model-row" data-model="contradiction" data-infinite>
+        <div data-slot="model"><bdi>Contradiction Model</bdi></div>
+        <div data-slot="usage-value"><div data-slot="requests"><bdi>123</bdi></div></div>
+      </div>
+    </figure>`), /both explicit unlimited evidence and a finite request value/i);
+});
+
+test("visible infinity text is explicit chart evidence even without a historical marker", () => {
+  const go = parseGoPage(`
+    <figure data-component="limit-graph">
+      <span data-item data-kind="go" data-model="future"><span data-value>∞</span><span data-name>Future Model</span></span>
+    </figure>`);
+  assert.deepEqual(go.chart["Future Model"], chartRow({ requests5h: null, limitState: "unlimited", limitEvidence: "chart_explicit_text" }));
+});
+
+test("legacy unlimited booleans without evidence are not trusted as modern quota evidence", () => {
+  assert.deepEqual(assessGoAllowanceState(
+    { requests5h: null, unlimited: true },
+    { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true },
+  ), {
+    state: "unknown",
+    confidence: "low",
+    chartState: "unknown",
+    docsState: "unknown",
+    evidence: [],
+  });
 });
 
 test("expands historical grouped profile labels without rename noise", () => {
@@ -135,7 +251,7 @@ test("normalizes historical promotion embedded in model name", () => {
       <span data-name>GPT 5.6 Luna (2x usage)</span>
     </span></figure>`;
   const go = parseGoPage(html);
-  assert.deepEqual(go.chart["GPT 5.6 Luna"], { requests5h: 4100, bonus: "2x usage", unlimited: false });
+  assert.deepEqual(go.chart["GPT 5.6 Luna"], chartRow({ requests5h: 4100, bonus: "2x usage" }));
   assert.equal(go.chart["GPT 5.6 Luna (2x usage)"], undefined);
 });
 

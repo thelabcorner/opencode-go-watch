@@ -1,4 +1,4 @@
-import { deriveConsistency } from "./parsers.js";
+import { deriveConsistency, normalizeRequestModelName } from "./parsers.js";
 
 const GO_CHANGE_TYPES = new Set([
   "chart_model_added",
@@ -12,6 +12,7 @@ const DOCS_CHANGE_TYPES = new Set([
   "model_added",
   "model_removed",
   "request_limit_changed",
+  "request_promotion_changed",
   "request_profile_added",
   "request_profile_removed",
   "request_profile_changed",
@@ -22,6 +23,10 @@ const DOCS_CHANGE_TYPES = new Set([
   "usage_note_removed",
   "usage_note_changed",
   "usage_copy_changed",
+  "go_plus_request_row_added",
+  "go_plus_request_row_removed",
+  "go_plus_pricing_row_added",
+  "go_plus_pricing_row_removed",
 ]);
 
 const WRAPPED_REGION_RE = /<span\b(?=[^>]*\bdata-regions\b)[^>]*>\s*\(\s*<a\b(?=[^>]*\bhref="([^"]+)")[^>]*>\s*limited\s+regions\s*<\/a>\s*\)\s*<\/span>/gi;
@@ -40,9 +45,7 @@ function numericDelta(before, after) {
   return { absolute, percent };
 }
 
-function fieldValue(row, field) {
-  return field === "unlimited" ? Boolean(row?.unlimited) : row?.[field];
-}
+function fieldValue(row, field) { return row?.[field]; }
 
 function diffMap({ before = {}, after = {}, addedType, removedType, changedType, fields }) {
   const changes = [];
@@ -55,6 +58,32 @@ function diffMap({ before = {}, after = {}, addedType, removedType, changedType,
       const newValue = fieldValue(after[key], field);
       if (same(oldValue, newValue)) continue;
       changes.push({ type: changedType, key, field, before: oldValue ?? null, after: newValue ?? null, ...numericDelta(oldValue, newValue) });
+    }
+  }
+  return changes;
+}
+
+function normalizedRequestMap(rows = {}) {
+  const out = {};
+  for (const [rawName, row] of Object.entries(rows)) {
+    const name = normalizeRequestModelName(rawName);
+    if (!name) continue;
+    // Prefer an already-stable key if an old snapshot somehow contains both forms.
+    if (!(name in out) || rawName === name) out[name] = row;
+  }
+  return out;
+}
+
+function diffExistingMapFields({ before = {}, after = {}, changedType, fields }) {
+  const changes = [];
+  for (const key of Object.keys(after).sort((a, b) => a.localeCompare(b))) {
+    if (!(key in before)) continue;
+    for (const field of fields) {
+      if (!Object.prototype.hasOwnProperty.call(before[key] ?? {}, field) || !Object.prototype.hasOwnProperty.call(after[key] ?? {}, field)) continue;
+      const oldValue = before[key]?.[field] ?? null;
+      const newValue = after[key]?.[field] ?? null;
+      if (same(oldValue, newValue)) continue;
+      changes.push({ type: changedType, key, field, before: oldValue, after: newValue, ...numericDelta(oldValue, newValue) });
     }
   }
   return changes;
@@ -81,7 +110,7 @@ function decodeMonitorText(value) {
   return String(value ?? "").replace(/<[^>]+>/g, "").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&#39;", "'").replace(/\s+/g, " ").trim();
 }
 
-function chartModelIdsFromMonitor(structure) {
+function chartIdsFromMonitor(structure) {
   const source = String(structure ?? "");
   if (!source) return {};
   const starts = [];
@@ -101,14 +130,14 @@ function chartModelIdsFromMonitor(structure) {
   return ids;
 }
 
-function diffChartModelIds(beforeGo, afterGo) {
-  const before = chartModelIdsFromMonitor(beforeGo?.monitorStructure);
-  const after = chartModelIdsFromMonitor(afterGo?.monitorStructure);
+function diffChartIds(beforeGo, afterGo) {
+  const before = chartIdsFromMonitor(beforeGo?.monitorStructure);
+  const after = chartIdsFromMonitor(afterGo?.monitorStructure);
   const changes = [];
   const names = new Set([...Object.keys(before), ...Object.keys(after)]);
   for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
     if (!(name in before) || !(name in after) || before[name] === after[name]) continue;
-    changes.push({ type: "chart_changed", key: name, field: "modelId", before: before[name], after: after[name] });
+    changes.push({ type: "chart_changed", key: name, field: "chartId", before: before[name], after: after[name] });
   }
   return changes;
 }
@@ -149,11 +178,36 @@ export function diffSnapshots(before, after) {
     if (!same(oldValue, newValue)) changes.push({ type: "global_limit_changed", field, before: oldValue, after: newValue, ...numericDelta(oldValue, newValue) });
   }
 
-  changes.push(...diffMap({ before: before.docs.requests, after: after.docs.requests, addedType: "model_added", removedType: "model_removed", changedType: "request_limit_changed", fields: ["requests5h", "requestsWeek", "requestsMonth", "unlimited"] }));
+  const beforeRequests = normalizedRequestMap(before.docs.requests);
+  const afterRequests = normalizedRequestMap(after.docs.requests);
+  changes.push(...diffMap({ before: beforeRequests, after: afterRequests, addedType: "model_added", removedType: "model_removed", changedType: "request_limit_changed", fields: ["requests5h", "requestsWeek", "requestsMonth"] }));
+  // limitState is intentionally compared only when both snapshots know about it.
+  // Schema upgrades from the legacy boolean therefore baseline silently instead of
+  // fabricating an unlimited/finite transition from historical weak evidence.
+  changes.push(...diffExistingMapFields({ before: beforeRequests, after: afterRequests, changedType: "request_limit_changed", fields: ["limitState"] }));
+  changes.push(...diffExistingMapFields({ before: beforeRequests, after: afterRequests, changedType: "request_promotion_changed", fields: ["promotionMultiplier", "promotionTiming"] }));
+  // Go Plus is a separate allowance namespace. Historical one-plan snapshots
+  // have no plus table; introducing it must not fabricate a numeric transition.
+  if (before.docs.requestsPlus && after.docs.requestsPlus) {
+    changes.push(...diffMap({ before: normalizedRequestMap(before.docs.requestsPlus), after: normalizedRequestMap(after.docs.requestsPlus), addedType: "go_plus_request_row_added", removedType: "go_plus_request_row_removed", changedType: "request_limit_changed", fields: ["requests5h", "requestsWeek", "requestsMonth"] }).map((change) => ({ ...change, plan: "Go Plus" })));
+    changes.push(...diffExistingMapFields({ before: normalizedRequestMap(before.docs.requestsPlus), after: normalizedRequestMap(after.docs.requestsPlus), changedType: "request_limit_changed", fields: ["limitState"] }).map((change) => ({ ...change, plan: "Go Plus" })));
+  }
   changes.push(...diffMap({ before: before.docs.profiles, after: after.docs.profiles, addedType: "request_profile_added", removedType: "request_profile_removed", changedType: "request_profile_changed", fields: ["inputTokens", "cachedTokens", "outputTokens"] }));
   changes.push(...diffMap({ before: before.docs.pricing, after: after.docs.pricing, addedType: "pricing_row_added", removedType: "pricing_row_removed", changedType: "pricing_changed", fields: ["inputPerM", "outputPerM", "cachedReadPerM", "cachedWritePerM", "usageUsd"] }));
-  changes.push(...diffMap({ before: before.go.chart, after: after.go.chart, addedType: "chart_model_added", removedType: "chart_model_removed", changedType: "chart_changed", fields: ["requests5h", "bonus", "unlimited"] }));
-  changes.push(...diffChartModelIds(before.go, after.go));
+  if (before.docs.pricingPlus && after.docs.pricingPlus) {
+    changes.push(...diffMap({ before: before.docs.pricingPlus, after: after.docs.pricingPlus, addedType: "go_plus_pricing_row_added", removedType: "go_plus_pricing_row_removed", changedType: "pricing_changed", fields: ["inputPerM", "outputPerM", "cachedReadPerM", "cachedWritePerM", "usageUsd"] }).map((change) => ({ ...change, plan: "Go Plus" })));
+  }
+  changes.push(...diffMap({ before: before.go.chart, after: after.go.chart, addedType: "chart_model_added", removedType: "chart_model_removed", changedType: "chart_changed", fields: ["requests5h", "bonus"] }));
+  // New chart fields are compared only after both snapshots know about them. This
+  // makes the schema upgrade a silent baseline expansion while still tracking every
+  // subsequent monthly-allowance/promotion-baseline/region-policy transition.
+  changes.push(...diffExistingMapFields({
+    before: before.go.chart,
+    after: after.go.chart,
+    changedType: "chart_changed",
+    fields: ["baseRequests5h", "monthlyAllowanceUsd", "baseMonthlyAllowanceUsd", "regionUrl", "limitState", "plusRequests5h", "plusMonthlyAllowanceUsd", "plusLimitState"],
+  }));
+  changes.push(...diffChartIds(before.go, after.go));
 
   if (before.go.promoBanner !== after.go.promoBanner) changes.push({ type: "promo_banner_changed", before: before.go.promoBanner, after: after.go.promoBanner });
 

@@ -85,7 +85,7 @@ test("first run captures baseline and sends one armed message", async () => {
   assert.equal((await readSnapshot(e)).docs.requests["GPT 5.6 Luna"].requests5h, 2050);
 });
 
-test("unchanged runs are silent and do not burn KV writes every five minutes", async () => {
+test("unchanged runs are silent and do not burn KV writes every poll", async () => {
   const e = env();
   await runWatch(e, { fetchImpl: makeFetch(), now: new Date("2026-08-19T18:00:00Z") });
   const writesAfterBootstrap = e.STATE.writes.length;
@@ -141,6 +141,72 @@ test("promotion transition reports chart value and bonus semantically", async ()
   assert.match(telegram[0].text, /GO CHART CHANGED/);
   assert.match(telegram[0].text, /4,300 → 34,400/);
   assert.match(telegram[0].text, /none → 8x usage/);
+});
+
+test("promotion deadline extension is one promotion update, not unlimited remove/add churn", async () => {
+  const e = env();
+  const beforeDocs = docsHtml.replace(
+    '<tr><td>Hy3</td><td>4,300</td><td>10,750</td><td>21,500</td></tr>',
+    '<tr><td>Hy3<br><small>8x · Ends Sep 20</small></td><td>4,300</td><td>10,750</td><td>21,500</td></tr>',
+  );
+  await runWatch(e, { fetchImpl: makeFetch({ docs: beforeDocs }), now: new Date("2026-09-20T23:40:00Z") });
+
+  const telegram = [];
+  const afterDocs = beforeDocs.replace("Ends Sep 20", "Ends Sep 27");
+  const result = await runWatch(e, {
+    fetchImpl: makeFetch({ docs: afterDocs, telegram }),
+    now: new Date("2026-09-21T00:40:00Z"),
+  });
+
+  assert.equal(result.status, "changed");
+  assert.deepEqual(result.changes.filter((change) => change.type === "request_promotion_changed"), [{
+    type: "request_promotion_changed",
+    key: "Hy3",
+    field: "promotionTiming",
+    before: "Ends Sep 20",
+    after: "Ends Sep 27",
+  }]);
+  assert.equal(result.changes.some((change) => change.type === "model_added" || change.type === "model_removed"), false);
+  assert.equal(telegram.length, 1);
+  assert.match(telegram[0].text, /OPENCODE GO · PROMOTION UPDATE/);
+  assert.match(telegram[0].text, /PROMOTION WINDOW CHANGED/);
+  assert.match(telegram[0].text, /Ends Sep 20 → Ends Sep 27/);
+  assert.doesNotMatch(telegram[0].text, /UNLIMITED|quota-exempt|FREE · Go/i);
+});
+
+test("schema hardening silently reparses and replaces an untrusted legacy baseline", async () => {
+  const e = env();
+  const telegram = [];
+  await runWatch(e, { fetchImpl: makeFetch({ telegram }), now: new Date("2026-09-20T23:00:00Z") });
+  telegram.length = 0;
+
+  const prior = await readSnapshot(e);
+  const poisoned = structuredClone(prior);
+  poisoned.schema = 7;
+  const stable = poisoned.docs.requests.Hy3;
+  delete poisoned.docs.requests.Hy3;
+  poisoned.docs.requests["Hy3 8x · Ends Sep 20"] = {
+    ...stable,
+    requests5h: null,
+    requestsWeek: null,
+    requestsMonth: null,
+    limitState: undefined,
+    limitEvidence: undefined,
+    unlimited: true,
+  };
+  await e.STATE.put("snapshot:v1", JSON.stringify(poisoned));
+  await e.STATE.put("hot:v1", JSON.stringify({ schema: 7, sourceState: poisoned.sourceState }));
+
+  const result = await runWatch(e, { fetchImpl: makeFetch({ telegram }), now: new Date("2026-09-20T23:10:00Z") });
+  assert.equal(result.status, "migrated");
+  assert.deepEqual(result.changes, []);
+  assert.equal(telegram.length, 0, "schema migration must not alert from untrusted old semantics");
+  const repaired = await readSnapshot(e);
+  assert.equal(repaired.schema, 8);
+  assert.equal(repaired.docs.requests.Hy3.requests5h, 4300);
+  assert.equal(repaired.docs.requests.Hy3.limitState, "finite");
+  assert.equal(repaired.docs.requests.Hy3.unlimited, false);
+  assert.equal(repaired.docs.requests["Hy3 8x · Ends Sep 20"], undefined);
 });
 
 test("Telegram failure preserves old baseline so the change will retry", async () => {

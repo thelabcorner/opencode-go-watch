@@ -34,7 +34,10 @@ test("source map keeps monitored Go/Zen namespaces explicit", () => {
   assert.match(sourceMap, /primary public availability surface for Go model IDs/i);
   assert.match(sourceMap, /chart membership, docs membership, and API availability are separate dimensions/i);
   assert.match(sourceMap, /same model name does not imply same model ID/i);
-  assert.match(sourceMap, /free.*unlimited.*different dimensions/is);
+  assert.match(sourceMap, /free.*quota exemption.*unknown evidence.*different dimensions/is);
+  assert.match(sourceMap, /Three blank\/dash request cells now map to `unknown`, not unlimited/i);
+  assert.match(sourceMap, /legacy `unlimited: true` boolean without evidence provenance is not sufficient/i);
+  assert.match(skill, /blank\/dash-only row is \*\*absence of numeric evidence\*\*, not affirmative infinity evidence/i);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/go\/index\.tsx/);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/zen\/go\/v1\/models\.ts/);
   assert.match(sourceMap, /anomalyco\/opencode:packages\/console\/app\/src\/routes\/zen\/util\/modelsHandler\.ts/);

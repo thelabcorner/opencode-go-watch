@@ -74,6 +74,46 @@ test("documented Go chart promotion affects current 5-hour capacity without bein
   assert.match(entry.warnings.join(" "), /monthly promotion coverage is not inferred/i);
 });
 
+test("explicit current/base chart allowance prevents promotion double-counting", () => {
+  const go = baseGo();
+  go.docs.requests.A = request(2000);
+  go.docs.pricing.A = price(0.1, 0.2, 0.01, 120);
+  go.go.chart.A = {
+    requests5h: 2000,
+    baseRequests5h: 1000,
+    monthlyAllowanceUsd: 120,
+    baseMonthlyAllowanceUsd: 60,
+    bonus: "2x usage",
+    unlimited: false,
+  };
+  const entry = usageYieldFor(buildGoUsageYieldRanking(go), "A");
+  assert.equal(entry.class, "paid");
+  assert.equal(entry.goCapacity.promotionMultiplier, 2, "badge remains semantic even when chart/docs effective requests match");
+  assert.equal(entry.goCapacity.includedUsageUsd, 120);
+  assert.equal(entry.goCapacity.documentedIncludedUsageUsd, 120);
+  assert.equal(entry.goCapacity.publishedChartMonthlyAllowanceUsd, 120);
+  assert.equal(entry.goCapacity.publishedBaseChartMonthlyAllowanceUsd, 60);
+  assert.equal(entry.goCapacity.monthlyEquivalentRequests, entry.goCapacity.baseMonthlyEquivalentRequests * 2);
+  assert.equal(entry.goCapacity.currentFiveHourEquivalentRequests, entry.goCapacity.baseFiveHourEquivalentRequests * 2);
+  assert.doesNotMatch(entry.warnings.join(" "), /monthly promotion coverage is not inferred/i);
+});
+
+test("conflicting chart and docs monthly allowance fails closed", () => {
+  const go = baseGo();
+  go.docs.pricing.A = price(0.1, 0.2, 0.01, 90);
+  go.go.chart.A = {
+    requests5h: 2000,
+    baseRequests5h: 1000,
+    monthlyAllowanceUsd: 120,
+    baseMonthlyAllowanceUsd: 60,
+    bonus: "2x usage",
+    unlimited: false,
+  };
+  const entry = usageYieldFor(buildGoUsageYieldRanking(go), "A");
+  assert.equal(entry.class, "unranked");
+  assert.match(entry.warnings.join(" "), /monthly allowance disagrees/i);
+});
+
 test("finite Go model with explicit zero pricing is classified as free with known published capacity", () => {
   const go = baseGo();
   go.docs.pricing.A = price(0, 0, 0, null);
