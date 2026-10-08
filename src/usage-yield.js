@@ -1,4 +1,4 @@
-import { canonicalModelKey } from "./parsers.js";
+import { assessGoAllowanceState, canonicalModelKey } from "./parsers.js";
 import {
   basePricingName,
   buildGoUsageYieldRanking as buildGoUsageYieldRankingCore,
@@ -63,23 +63,24 @@ function quotaExemptChartOnly(name) {
   return {
     name,
     class: "quota-exempt",
-    free: true,
+    free: false,
+    quotaExempt: true,
     rank: null,
     total: 0,
     tieCount: 1,
     basis: "go-quota-exempt",
-    score: 0,
-    costPerEquivalentRequest: 0,
+    score: null,
+    costPerEquivalentRequest: null,
     requestsPerDollar: null,
-    minCost: 0,
-    maxCost: 0,
+    minCost: null,
+    maxCost: null,
     variantCount: 0,
     fractionOfBest: null,
     costMultipleVsBest: null,
     confidence: "medium",
     warnings: [
-      "Go quota-exempt status does not prove the underlying free-model gateway has no separate rate limit.",
-      "Go chart/docs currently disagree on quota-exempt state.",
+      "The Go chart explicitly shows quota exemption, but the docs do not yet corroborate it.",
+      "Quota exemption does not prove free service or absence of a separate provider/API rate limit.",
     ],
     goCapacity: {
       includedUsageUsd: null,
@@ -141,7 +142,8 @@ export function buildGoUsageYieldRanking(snapshot) {
   for (const [key, name] of allowed) {
     if (existing.has(key)) continue;
     const chartRow = Object.entries(chart).find(([candidate]) => canonicalModelKey(candidate) === key)?.[1] ?? null;
-    entries.push(chartRow?.unlimited ? quotaExemptChartOnly(name) : unrankedChartOnly(name));
+    const allowance = assessGoAllowanceState(chartRow, null);
+    entries.push(allowance.state === "quota_exempt" ? quotaExemptChartOnly(name) : unrankedChartOnly(name));
   }
 
   for (const entry of entries) {

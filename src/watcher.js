@@ -9,6 +9,7 @@ import {
 import {
   parsePreparedDocsPage,
   parsePreparedGoPage,
+  limitStateOf,
   prepareDocsPage,
   prepareGoPage,
 } from "./parsers.js";
@@ -25,7 +26,7 @@ const SNAPSHOT_KEY = "snapshot:v1";
 const HOT_KEY = "hot:v1";
 const META_KEY = "meta:v1";
 const ERROR_KEY = "error:v1";
-const SNAPSHOT_SCHEMA = 5;
+const SNAPSHOT_SCHEMA = 8;
 const ERROR_REPEAT_MS = 6 * 60 * 60 * 1000;
 const HEARTBEAT_MS = 60 * 60 * 1000;
 const MAX_PAGE_BYTES = 5_000_000;
@@ -46,6 +47,15 @@ export function validateSnapshot(snapshot) {
   if (requestCount < 10) errors.push(`docs request table found ${requestCount} models; refusing baseline update`);
   if (pricingCount < 10) errors.push(`docs pricing table found ${pricingCount} rows; refusing baseline update`);
   if (profileCount < 8) errors.push(`docs request profiles found ${profileCount} models; refusing baseline update`);
+  if (snapshot.docs?.requestsPlus) {
+    const plusCount = countKeys(snapshot.docs.requestsPlus);
+    if (plusCount < 10) errors.push(`Go Plus docs request table found ${plusCount} models; refusing baseline update`);
+  }
+  if (snapshot.docs?.pricingPlus) {
+    const plusCount = countKeys(snapshot.docs.pricingPlus);
+    if (plusCount < 10) errors.push(`Go Plus docs pricing table found ${plusCount} rows; refusing baseline update`);
+  }
+  if (Boolean(snapshot.docs?.requestsPlus) !== Boolean(snapshot.docs?.pricingPlus)) errors.push("Go Plus docs request and pricing tables are incomplete");
   if (countKeys(snapshot.docs?.limits) !== 3) errors.push("docs usage-window policy is incomplete");
 
   if (snapshot.sources?.api) {
@@ -55,13 +65,19 @@ export function validateSnapshot(snapshot) {
     if (new Set(snapshot.api?.modelIds ?? []).size !== apiCount) errors.push("Go models API contains duplicate model IDs");
   }
 
-  for (const [name, row] of Object.entries(snapshot.docs?.requests ?? {})) {
-    if (row.unlimited === true) {
+  for (const [name, row] of [...Object.entries(snapshot.docs?.requests ?? {}), ...Object.entries(snapshot.docs?.requestsPlus ?? {})]) {
+    const state = limitStateOf(row);
+    if (row.unlimited !== (state === "unlimited")) errors.push(`${name}.unlimited is inconsistent with limitState=${state}`);
+    if (state === "unlimited" || state === "unknown") {
       for (const field of ["requests5h", "requestsWeek", "requestsMonth"]) {
-        if (row[field] != null) errors.push(`${name}.${field} must be null for an unlimited/quota-exempt model`);
+        if (row[field] != null) errors.push(`${name}.${field} must be null when docs limitState=${state}`);
       }
+      if (state === "unlimited" && row.limitEvidence !== "docs_explicit_unlimited") errors.push(`${name}.limitEvidence does not explicitly support docs unlimited state`);
+      if (state === "unknown" && row.limitEvidence !== "docs_empty_row") errors.push(`${name}.limitEvidence does not explain docs unknown state`);
       continue;
     }
+    if (state !== "finite") errors.push(`${name}.limitState is invalid`);
+    if (row.limitEvidence !== "docs_numeric") errors.push(`${name}.limitEvidence does not support finite docs state`);
     for (const field of ["requests5h", "requestsWeek", "requestsMonth"]) {
       if (!Number.isSafeInteger(row[field]) || row[field] <= 0) errors.push(`${name}.${field} is invalid`);
     }
@@ -70,10 +86,28 @@ export function validateSnapshot(snapshot) {
   }
 
   for (const [name, row] of Object.entries(snapshot.go?.chart ?? {})) {
-    if (row.unlimited === true) {
+    const state = limitStateOf(row);
+    if (row.unlimited !== (state === "unlimited")) errors.push(`${name}.unlimited is inconsistent with limitState=${state}`);
+    if (state === "unlimited") {
       if (row.requests5h != null) errors.push(`${name}.requests5h must be null for an infinite Go-chart entry`);
-    } else if (!Number.isSafeInteger(row.requests5h) || row.requests5h <= 0) {
-      errors.push(`${name}.requests5h is invalid`);
+      if (!["chart_data_infinite", "chart_explicit_text", "chart_marker_and_text"].includes(row.limitEvidence)) errors.push(`${name}.limitEvidence does not explicitly support chart unlimited state`);
+    } else if (state === "finite") {
+      if (row.limitEvidence !== "chart_numeric") errors.push(`${name}.limitEvidence does not support finite chart state`);
+      if (!Number.isSafeInteger(row.requests5h) || row.requests5h <= 0) errors.push(`${name}.requests5h is invalid`);
+    } else {
+      errors.push(`${name}.limitState=${state} is not safe for a parsed chart row`);
+    }
+    for (const field of ["baseRequests5h", "monthlyAllowanceUsd", "baseMonthlyAllowanceUsd"]) {
+      const value = row[field];
+      if (value != null && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) errors.push(`${name}.${field} is invalid`);
+    }
+    if (row.regionUrl != null && typeof row.regionUrl !== "string") errors.push(`${name}.regionUrl is invalid`);
+    if (row.plusLimitState != null) {
+      if (!["finite", "unlimited"].includes(row.plusLimitState)) errors.push(`${name}.plusLimitState is invalid`);
+      if (row.plusLimitEvidence !== (row.plusLimitState === "unlimited" ? "chart_explicit_text" : "chart_numeric")) errors.push(`${name}.plusLimitEvidence is invalid`);
+      if (row.plusLimitState === "finite" && (!Number.isSafeInteger(row.plusRequests5h) || row.plusRequests5h <= 0)) errors.push(`${name}.plusRequests5h is invalid`);
+      if (row.plusLimitState === "unlimited" && row.plusRequests5h != null) errors.push(`${name}.plusRequests5h must be null when unlimited`);
+      if (row.plusMonthlyAllowanceUsd != null && (!Number.isFinite(row.plusMonthlyAllowanceUsd) || row.plusMonthlyAllowanceUsd <= 0)) errors.push(`${name}.plusMonthlyAllowanceUsd is invalid`);
     }
   }
 
@@ -329,8 +363,8 @@ async function writeMeta(env, patch) {
 
 async function maybeHeartbeat(env, checkedAt) {
   const now = new Date(checkedAt);
-  // Cron is exactly every five minutes; the scheduled event time passed by index.js
-  // makes :00 deterministic. This removes eleven of twelve steady-state META reads.
+  // The scheduled event time passed by index.js makes :00 deterministic for the
+  // current 10-minute cadence. This keeps steady-state META reads to once per hour.
   if (now.getUTCMinutes() !== 0) return;
   const meta = await readMeta(env);
   const last = new Date(meta.lastHeartbeatAt ?? 0).getTime();
@@ -412,12 +446,34 @@ export async function runWatch(env, { fetchImpl = fetch, now = new Date(), force
     return { status: "bootstrapped", changes: [], snapshot, optimization };
   }
 
+  const needsSchemaUpgrade = previous.schema !== SNAPSHOT_SCHEMA;
+
+  // Never diff a newly hardened semantic schema against an older representation.
+  // Older snapshots may contain inferences that the new schema intentionally no
+  // longer trusts (for example dash-only rows previously promoted to unlimited).
+  // Reparse every source, validate the new snapshot, then silently replace the
+  // semantic baseline. This prevents a schema deploy from manufacturing alerts out
+  // of representation changes or carrying a poisoned inference forward.
+  if (needsSchemaUpgrade) {
+    await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    await writeHot(env, inspected.hot);
+    await writeMeta(env, {
+      lastSuccessAt: checkedAt,
+      lastHeartbeatAt: checkedAt,
+      lastChangeCount: 0,
+      schemaMigratedAt: checkedAt,
+      schemaMigratedFrom: previous.schema ?? null,
+      schemaMigratedTo: SNAPSHOT_SCHEMA,
+    });
+    if (previousError) await env.STATE.delete(ERROR_KEY);
+    return { status: "migrated", changes: [], snapshot, optimization };
+  }
+
   validateTransition(previous, snapshot);
   const changes = [
     ...diffSnapshots(previous, snapshot),
     ...diffGoModelsApi(previous.api, snapshot.api),
   ];
-  const needsSchemaUpgrade = previous.schema !== SNAPSHOT_SCHEMA;
   const needsApiBaseline = Boolean(snapshot.api && !previous.api);
 
   if (changes.length) {

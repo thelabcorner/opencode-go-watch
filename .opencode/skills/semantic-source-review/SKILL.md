@@ -27,7 +27,7 @@ Start by reading:
 - `src/parsers.js`
 - `src/diff.js`
 - `src/watcher.js`
-- `src/zen-watcher.js`
+- `src/zen.js`
 - `src/telegram.js`
 - `src/zen-telegram.js`
 - relevant tests under `test/`
@@ -93,7 +93,7 @@ Order of preference:
 
 If the parser already has the concept, teach it another representation.
 
-Example pattern: finite request count versus quota-exempt/infinite state. Parse the state generically from stable signals (`∞`, an explicit infinite marker, or the documented all-empty quota row) and diff the `unlimited` dimension. Do not special-case one model name.
+Example pattern: finite request count versus quota-exempt/infinite state. Parse affirmative state from stable signals such as `∞`, explicit `unlimited` text, or an explicit infinite marker. A blank/dash-only row is **absence of numeric evidence**, not affirmative infinity evidence; preserve it as `unknown` unless another source independently establishes the state. Prefer an explicit `finite | unlimited | unknown` state plus evidence provenance over a bare boolean. Do not special-case one model name.
 
 ### B. Add a new semantic field to the snapshot
 
@@ -127,9 +127,9 @@ Useful generalization patterns:
 - pair model identity using stable name/ID relationships rather than array index;
 - treat row/table ordering as presentation;
 - parse thresholded pricing variants as variants of a base model, not as unrelated magic strings;
-- distinguish `free` from `unlimited` unless a source explicitly proves both;
+- distinguish `free` from quota-exempt/unlimited unless independent source evidence explicitly proves both;
 - distinguish Go namespace IDs from Zen namespace IDs;
-- model finite ↔ unlimited, paid ↔ free, present ↔ absent, and documented ↔ API-only as state transitions;
+- model finite ↔ unlimited ↔ unknown, paid ↔ free, present ↔ absent, and documented ↔ API-only as state transitions;
 - prefer a generic enum/boolean/field transition over one-off event names tied to a model.
 
 ## 7. Preserve uncertainty honestly
@@ -138,7 +138,9 @@ Do not infer hidden production behavior from public presentation.
 
 Examples:
 
-- `∞` on Go can support a Go quota-exempt/unlimited **Go allowance** state; it does not by itself prove the underlying anonymous/free API bucket has no rate limit.
+- `∞` or another explicit infinity signal on Go can support a quota-exempt/unlimited **Go allowance** state; a dash/blank does not. Even explicit `∞` does not by itself prove free service or that the underlying provider/API path has no independent rate limit.
+- conflicting finite and infinity evidence must remain a conflict; do not choose the more dramatic state.
+- legacy booleans without evidence provenance are migration data, not fresh affirmative evidence.
 - a `-free` model ID can support free-model identity, but it does not prove whether several free models share one private rate-limit bucket.
 - a docs/API disagreement may be docs lag, rollout staging, or a real inconsistency. Preserve the observable facts unless another public source resolves it.
 
@@ -200,7 +202,7 @@ Use this as navigation, not as a mandatory edit list:
 - `src/parsers.js` — Go source preparation and semantic extraction.
 - `src/diff.js` — Go semantic transitions and residual fallback.
 - `src/watcher.js` — Go snapshot schema/validation and baseline semantics.
-- `src/zen-watcher.js` — Zen parsing, snapshot construction, semantic diffing, source authority.
+- `src/zen.js` — Zen parsing, snapshot construction, semantic diffing, source authority.
 - `src/telegram.js` / `src/zen-telegram.js` — human rendering after the semantic type is correct.
 - `src/history.js` — historical alert classification.
 - `src/dashboard.js` / `src/zen-dashboard.js` — only when a new semantic field should be displayed.

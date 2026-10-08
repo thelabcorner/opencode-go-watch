@@ -112,11 +112,15 @@ function freeNotesFromText(sectionText, endpoints) {
 function notesFromText(sectionText) {
   /** @type {Record<string, string>} */
   const notes = {};
-  const peak = /DeepSeek[^.\n]*Peak hours[^.\n]*\.?/i.exec(sectionText);
+  // textContent preserves paragraph endings as newlines, but table text can share
+  // the beginning of that line. Anchor at the semantic phrase and consume to the
+  // newline rather than using '.' as a sentence boundary: V4.1 and 4.4% are data.
+  const source = String(sectionText ?? "");
+  const peak = /\bDeepSeek\b[^\n]{0,600}?\bPeak hours?\b[^\n]*/i.exec(source);
   if (peak) notes.deepSeekPeakHours = normalizeSpace(peak[0]);
-  const fees = /Credit card fees[^.\n]*\.?/i.exec(sectionText);
+  const fees = /\bCredit card fees\b[^\n]*/i.exec(source);
   if (fees) notes.cardFees = normalizeSpace(fees[0]);
-  const reload = /If your balance goes below \$[\d.]+[^.\n]*\.?/i.exec(sectionText);
+  const reload = /\bIf your balance goes below \$[\d.]+\b[^\n]*/i.exec(source);
   if (reload) notes.autoReload = normalizeSpace(reload[0]);
   return notes;
 }

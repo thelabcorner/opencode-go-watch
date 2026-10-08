@@ -50,6 +50,17 @@ test("reverse-engineered Zen docs parser extracts endpoints, pricing, free offer
   assert(docs.offers.some((offer) => /limited time/i.test(offer)));
 });
 
+test("Zen policy notes preserve decimal punctuation instead of truncating it", () => {
+  const fx = fixture(4);
+  const html = fx.html.replace(
+    '<h2 id="privacy">',
+    '<p>Credit card fees are passed along at cost (4.4% + $0.30 per transaction); we do not charge anything beyond that.</p><p>If your balance goes below $5, Zen will automatically reload $20.</p><h2 id="privacy">',
+  );
+  const docs = parseZenDocs(html);
+  assert.equal(docs.notes.cardFees, "Credit card fees are passed along at cost (4.4% + $0.30 per transaction); we do not charge anything beyond that.");
+  assert.equal(docs.notes.autoReload, "If your balance goes below $5, Zen will automatically reload $20.");
+});
+
 test("Zen API parser treats model ids as authoritative availability", () => {
   const parsed = parseZenModelsApi(JSON.stringify({ object: "list", data: [{ id: "qwen3.7-plus", object: "model", created: 1, owned_by: "opencode" }, { id: "x-preview-f-free", object: "model", created: 1, owned_by: "opencode" }] }));
   assert.deepEqual(parsed.modelIds, ["qwen3.7-plus", "x-preview-f-free"]);

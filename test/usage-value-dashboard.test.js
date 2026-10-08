@@ -12,9 +12,9 @@ function goSnapshot() {
       limits: { fiveHourUsd: 12, weeklyUsd: 30, monthlyUsd: 60 },
       notes: {},
       requests: {
-        Budget: { requests5h: 1000, requestsWeek: 2500, requestsMonth: 5000, unlimited: false },
-        Premium: { requests5h: 100, requestsWeek: 250, requestsMonth: 500, unlimited: false },
-        Freebie: { requests5h: null, requestsWeek: null, requestsMonth: null, unlimited: true },
+        Budget: { requests5h: 1000, requestsWeek: 2500, requestsMonth: 5000, limitState: "finite", limitEvidence: "docs_numeric", unlimited: false },
+        Premium: { requests5h: 100, requestsWeek: 250, requestsMonth: 500, limitState: "finite", limitEvidence: "docs_numeric", unlimited: false },
+        Freebie: { requests5h: null, requestsWeek: null, requestsMonth: null, limitState: "unlimited", limitEvidence: "docs_explicit_unlimited", unlimited: true },
       },
       profiles: {
         Budget: { inputTokens: 800, cachedTokens: 50_000, outputTokens: 180 },
@@ -50,7 +50,7 @@ test("Go Usage Yield dashboard renders subscription-capacity leaderboard and sep
   assert.match(html, /standardized req/);
   assert.match(html, /req \/ \$/i);
   assert.match(html, /1 Go quota-exempt model tracked separately/);
-  assert.match(html, /Free ≠ unlimited/);
+  assert.match(html, /Free and quota-exempt are separate evidence dimensions/);
 });
 
 test("Zen Usage Yield dashboard ranks paid models and keeps free capacity outside paid ordering", () => {

@@ -19,7 +19,7 @@ function timeOf(value) {
  * persistence/notification attempts are throttled to once per retry window.
  *
  * The caller deliberately does not update lastSeenAt while suppressed. That makes
- * the persisted timestamp double as the retry clock and prevents a five-minute cron
+ * the persisted timestamp double as the retry clock and prevents a ten-minute cron
  * from turning one upstream outage into hundreds of KV writes per day.
  */
 export function shouldRecordFailure(previous, error, now = new Date()) {

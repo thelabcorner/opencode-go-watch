@@ -1,4 +1,4 @@
-import { canonicalModelKey, deriveConsistency } from "./parsers.js";
+import { assessGoAllowanceState, canonicalModelKey, deriveConsistency, limitStateOf, parseBonusMultiplier } from "./parsers.js";
 
 const EPSILON = 1e-12;
 const CALIBRATION_SCHEMA = 2;
@@ -320,6 +320,10 @@ function usageUsdEvidence(rows) {
   return { values, value: values.length === 1 ? values[0] : null, consistent: values.length <= 1 };
 }
 
+function nearlyEqual(a, b) {
+  return finite(a) != null && finite(b) != null && Math.abs(a - b) <= EPSILON * Math.max(1, Math.abs(a), Math.abs(b));
+}
+
 function allPublishedTokenPricesZero(rows) {
   if (!rows.length) return false;
   return rows.every((row) => {
@@ -350,7 +354,7 @@ function unrankedEntry(name, rows, warnings) {
   };
 }
 
-function evaluatePaidModel({ name, rows, corpus, notes = {}, ownProfile = null, request = null, goLimits = null, requireGoAllowance = false, promotionMultiplier = 1, chart = null }) {
+function evaluatePaidModel({ name, rows, corpus, notes = {}, ownProfile = null, request = null, goLimits = null, requireGoAllowance = false, promotionMultiplier = 1, chart = null, allowanceAssessment = null }) {
   if (!corpus?.workloads?.length) return unrankedEntry(name, rows, ["No standardized OpenCode Go workload calibration is available."]);
   if (!rows.length) return unrankedEntry(name, rows, ["No published pricing row is available."]);
 
@@ -382,15 +386,33 @@ function evaluatePaidModel({ name, rows, corpus, notes = {}, ownProfile = null, 
   if (requireGoAllowance && !allowance.consistent) {
     return unrankedEntry(name, rows, ["Published Go included-usage values differ across pricing variants; no generic allowance rule is established."]);
   }
-  if (requireGoAllowance && !(allowance.value > 0)) {
+
+  const documentedAllowanceUsd = finite(allowance.value);
+  const chartAllowanceUsd = finite(chart?.monthlyAllowanceUsd);
+  const chartBaseAllowanceUsd = finite(chart?.baseMonthlyAllowanceUsd);
+  const docsMatchesChartCurrent = nearlyEqual(documentedAllowanceUsd, chartAllowanceUsd);
+  const docsMatchesChartBase = nearlyEqual(documentedAllowanceUsd, chartBaseAllowanceUsd);
+  if (requireGoAllowance && documentedAllowanceUsd != null && chartAllowanceUsd != null && !docsMatchesChartCurrent && !docsMatchesChartBase) {
+    return unrankedEntry(name, rows, ["Published Go monthly allowance disagrees between the chart and pricing table; refusing to guess which value is current."]);
+  }
+
+  // The landing chart now publishes current monthly allowance directly. Prefer that
+  // current-state evidence when present; pricing-table usage remains the fallback for
+  // historical snapshots and models whose chart row does not expose an allowance.
+  const currentAllowanceUsd = chartAllowanceUsd ?? documentedAllowanceUsd;
+  if (requireGoAllowance && !(currentAllowanceUsd > 0)) {
     return unrankedEntry(name, rows, ["Published Go included usage is missing, so subscription-capacity rank cannot be computed."]);
   }
 
   const practicalWorkload = workloadFromProfile(ownProfile);
   const practical = practicalWorkload ? evaluateWorkload(parsedRows, practicalWorkload, peakFraction) : null;
   const practicalCost = practical?.ok ? practical.expectedCost : null;
-  const sourceMonthly = request?.unlimited ? null : finite(request?.requestsMonth);
-  const impliedSourceCost = sourceMonthly && allowance.value != null ? allowance.value / sourceMonthly : null;
+  const requestState = limitStateOf(request);
+  const chartState = limitStateOf(chart);
+  const sourceMonthly = requestState === "finite" ? finite(request?.requestsMonth) : null;
+  // Request counts and pricing-table allowance come from the same docs surface, so
+  // keep their self-consistency calibration paired even when the chart is newer.
+  const impliedSourceCost = sourceMonthly && documentedAllowanceUsd != null ? documentedAllowanceUsd / sourceMonthly : null;
   const agreement = impliedSourceCost && practicalCost
     ? 1 - Math.min(1, Math.abs(impliedSourceCost - practicalCost) / impliedSourceCost)
     : null;
@@ -399,18 +421,32 @@ function evaluatePaidModel({ name, rows, corpus, notes = {}, ownProfile = null, 
     ? goLimits.fiveHourUsd / goLimits.monthlyUsd : null;
   const weeklyRatio = finite(goLimits?.weeklyUsd) != null && finite(goLimits?.monthlyUsd) > 0
     ? goLimits.weeklyUsd / goLimits.monthlyUsd : null;
-  const monthlyEquivalentRequests = allowance.value != null ? allowance.value / cost : null;
-  const baseFiveHourEquivalentRequests = monthlyEquivalentRequests != null && fiveHourRatio != null
-    ? monthlyEquivalentRequests * fiveHourRatio : null;
+  const monthlyEquivalentRequests = currentAllowanceUsd != null ? currentAllowanceUsd / cost : null;
+  const baseAllowanceUsd = chartBaseAllowanceUsd
+    ?? (chartAllowanceUsd == null || promotionMultiplier <= 1 ? currentAllowanceUsd : null);
+  const baseMonthlyEquivalentRequests = baseAllowanceUsd != null ? baseAllowanceUsd / cost : null;
+  const baseFiveHourEquivalentRequests = baseMonthlyEquivalentRequests != null && fiveHourRatio != null
+    ? baseMonthlyEquivalentRequests * fiveHourRatio : null;
   const weeklyEquivalentRequests = monthlyEquivalentRequests != null && weeklyRatio != null
     ? monthlyEquivalentRequests * weeklyRatio : null;
-  const currentFiveHourEquivalentRequests = baseFiveHourEquivalentRequests != null
-    ? baseFiveHourEquivalentRequests * promotionMultiplier : null;
+  // Explicit current monthly allowance already contains any monthly promotion. Do
+  // not multiply it again. Legacy snapshots without current monthly evidence retain
+  // the old, deliberately 5-hour-only promotion behavior.
+  const currentFiveHourEquivalentRequests = chartAllowanceUsd != null && monthlyEquivalentRequests != null && fiveHourRatio != null
+    ? monthlyEquivalentRequests * fiveHourRatio
+    : baseFiveHourEquivalentRequests != null ? baseFiveHourEquivalentRequests * promotionMultiplier : null;
 
   const warnings = [];
   if (practicalWorkload && practicalCost == null) warnings.push("The model's own published Go request profile could not be priced completely.");
   if (agreement != null && agreement < 0.7) warnings.push("Published request estimates and modeled own-profile cost differ materially.");
-  if (promotionMultiplier > 1) warnings.push(`Current Go 5-hour chart promotion is ${promotionMultiplier}x; monthly promotion coverage is not inferred.`);
+  if (allowanceAssessment?.confidence === "medium") warnings.push("Go allowance state is supported by only one finite source; missing/unknown source evidence is not treated as unlimited.");
+  if (requestState === "unknown") warnings.push("The docs request-limit row has no numeric or explicit unlimited evidence; it is treated as unknown, not quota-exempt.");
+  if (promotionMultiplier > 1 && chartAllowanceUsd == null) warnings.push(`Current Go 5-hour chart promotion is ${promotionMultiplier}x; monthly promotion coverage is not inferred.`);
+  if (chartAllowanceUsd != null && docsMatchesChartBase && !docsMatchesChartCurrent) warnings.push("The Go chart publishes a newer current monthly allowance while the pricing table still matches the chart's base allowance.");
+  if (promotionMultiplier > 1 && chartAllowanceUsd != null && chartBaseAllowanceUsd != null) {
+    const allowanceMultiplier = chartAllowanceUsd / chartBaseAllowanceUsd;
+    if (!nearlyEqual(allowanceMultiplier, promotionMultiplier)) warnings.push("The Go promotion badge multiplier differs from the chart's published current/base monthly allowance ratio.");
+  }
 
   return {
     name,
@@ -444,16 +480,21 @@ function evaluatePaidModel({ name, rows, corpus, notes = {}, ownProfile = null, 
       impliedSourceCost,
       agreement,
     },
-    goCapacity: allowance.value == null ? null : {
-      includedUsageUsd: allowance.value,
+    goCapacity: currentAllowanceUsd == null ? null : {
+      includedUsageUsd: currentAllowanceUsd,
+      documentedIncludedUsageUsd: documentedAllowanceUsd,
+      publishedChartMonthlyAllowanceUsd: chartAllowanceUsd,
+      publishedBaseChartMonthlyAllowanceUsd: chartBaseAllowanceUsd,
+      baseMonthlyEquivalentRequests,
       baseFiveHourEquivalentRequests,
       currentFiveHourEquivalentRequests,
       promotionMultiplier,
       weeklyEquivalentRequests,
       monthlyEquivalentRequests,
-      publishedFiveHourRequests: request?.unlimited ? null : finite(request?.requests5h),
-      publishedCurrentFiveHourRequests: chart?.unlimited ? null : finite(chart?.requests5h),
-      publishedWeeklyRequests: request?.unlimited ? null : finite(request?.requestsWeek),
+      publishedFiveHourRequests: requestState === "finite" ? finite(request?.requests5h) : null,
+      publishedBaseFiveHourRequests: chartState === "finite" ? finite(chart?.baseRequests5h) : null,
+      publishedCurrentFiveHourRequests: chartState === "finite" ? finite(chart?.requests5h) : null,
+      publishedWeeklyRequests: requestState === "finite" ? finite(request?.requestsWeek) : null,
       publishedMonthlyRequests: sourceMonthly,
     },
     confidence: warnings.length ? "medium" : "high",
@@ -556,31 +597,42 @@ export function buildGoUsageYieldRanking(snapshot) {
     const chart = canonicalLookup(snapshot?.go?.chart, key);
     const rows = groups.get(key)?.rows ?? [];
     const consistency = chartConsistencyFor(snapshot, key);
-    const promotionMultiplier = consistency?.status === "promotion" && finite(consistency.multiplier) > 1
-      ? consistency.multiplier : 1;
+    const allowanceAssessment = assessGoAllowanceState(chart, request);
+    const chartMultiplier = parseBonusMultiplier(chart?.bonus);
+    const consistencyMultiplier = consistency?.status === "promotion" ? finite(consistency.multiplier) : null;
+    const promotionMultiplier = finite(chartMultiplier) > 1
+      ? chartMultiplier
+      : consistencyMultiplier > 1 ? consistencyMultiplier : 1;
 
-    if (request?.unlimited === true || chart?.unlimited === true) {
-      const disagreement = Boolean(request?.unlimited) !== Boolean(chart?.unlimited) && chart != null;
+    if (allowanceAssessment.state === "conflict") {
+      entries.push(unrankedEntry(name, rows, [
+        `Go allowance sources conflict (${allowanceAssessment.chartState} chart vs ${allowanceAssessment.docsState} docs); refusing to classify the model as quota-exempt or finite.`,
+      ]));
+      continue;
+    }
+
+    if (allowanceAssessment.state === "quota_exempt") {
       entries.push({
         name,
         class: "quota-exempt",
-        free: true,
+        free: false,
+        quotaExempt: true,
         rank: null,
         total: 0,
         tieCount: 1,
         basis: "go-quota-exempt",
-        score: 0,
-        costPerEquivalentRequest: 0,
+        score: null,
+        costPerEquivalentRequest: null,
         requestsPerDollar: null,
-        minCost: 0,
-        maxCost: 0,
+        minCost: null,
+        maxCost: null,
         variantCount: rows.length,
         fractionOfBest: null,
         costMultipleVsBest: null,
-        confidence: disagreement ? "medium" : "high",
+        confidence: allowanceAssessment.confidence,
         warnings: [
-          "Go quota-exempt status does not prove the underlying free-model gateway has no separate rate limit.",
-          ...(disagreement ? ["Go chart/docs currently disagree on quota-exempt state."] : []),
+          "Explicit Go allowance evidence supports quota exemption; this does not prove free service or absence of a separate provider/API rate limit.",
+          ...(allowanceAssessment.confidence === "medium" ? ["Only one source explicitly establishes quota exemption; the other source does not independently confirm it."] : []),
         ],
         goCapacity: {
           includedUsageUsd: null,
@@ -633,6 +685,7 @@ export function buildGoUsageYieldRanking(snapshot) {
       requireGoAllowance: true,
       promotionMultiplier,
       chart,
+      allowanceAssessment,
     }));
   }
 

@@ -27,6 +27,8 @@ function fieldLabel(field) {
     requests5h: "5h requests",
     requestsWeek: "weekly requests",
     requestsMonth: "monthly requests",
+    promotionMultiplier: "promo multiplier",
+    promotionTiming: "promo timing",
     inputPerM: "input price",
     outputPerM: "output price",
     cachedReadPerM: "cached-read price",
@@ -35,8 +37,16 @@ function fieldLabel(field) {
     inputTokens: "input/request",
     cachedTokens: "cached/request",
     outputTokens: "output/request",
+    baseRequests5h: "promo-base 5h requests",
+    monthlyAllowanceUsd: "monthly usage",
+    baseMonthlyAllowanceUsd: "promo-base monthly usage",
+    regionUrl: "region policy",
+    limitState: "Go allowance state",
+    plusRequests5h: "Go Plus 5h requests",
+    plusMonthlyAllowanceUsd: "Go Plus monthly usage",
+    plusLimitState: "Go Plus allowance state",
     bonus: "promotion",
-    modelId: "model ID",
+    chartId: "chart ID",
     fiveHourUsd: "5h allowance",
     weeklyUsd: "weekly allowance",
     monthlyUsd: "monthly allowance",
@@ -44,19 +54,24 @@ function fieldLabel(field) {
 }
 
 function describeChange(change) {
-  const key = change.key ? `${change.key}: ` : "";
+  const key = change.key ? `${change.plan === "Go Plus" ? "Go Plus · " : ""}${change.key}: ` : "";
   switch (change.type) {
     case "model_added": return `Model added: ${change.key}`;
     case "model_removed": return `Model removed: ${change.key}`;
     case "chart_model_added": return `Go chart added ${change.key}`;
     case "chart_model_removed": return `Go chart removed ${change.key}`;
     case "chart_changed":
-      if (change.field === "modelId") return `Go model ID changed: ${change.key}: ${fmt(change.before)} → ${fmt(change.after)}`;
+      if (change.field === "chartId") return `Go chart ID changed: ${change.key}: ${fmt(change.before)} → ${fmt(change.after)}`;
       return `${key}${fieldLabel(change.field)} ${fmt(change.before)} → ${fmt(change.after)}`;
     case "pricing_row_added": return `Pricing row added: ${change.key}`;
     case "pricing_row_removed": return `Pricing row removed: ${change.key}`;
+    case "go_plus_request_row_added": return `Go Plus request model added: ${change.key}`;
+    case "go_plus_request_row_removed": return `Go Plus request model removed: ${change.key}`;
+    case "go_plus_pricing_row_added": return `Go Plus pricing row added: ${change.key}`;
+    case "go_plus_pricing_row_removed": return `Go Plus pricing row removed: ${change.key}`;
     case "request_profile_added": return `Request profile added: ${change.key}`;
     case "request_profile_removed": return `Request profile removed: ${change.key}`;
+    case "request_promotion_changed": return `${key}${fieldLabel(change.field)} ${fmt(change.before)} → ${fmt(change.after)}`;
     case "promo_banner_changed": return `Promotion banner: ${fmt(change.before)} → ${fmt(change.after)}`;
     case "consistency_mismatch": return `Chart/docs mismatch: ${change.key}`;
     case "consistency_resolved": return `Chart/docs mismatch resolved: ${change.key}`;
@@ -71,8 +86,8 @@ function describeChange(change) {
 function headlineForChanges(changes) {
   const types = new Set(changes.map((change) => change.type));
   if (types.has("unclassified_source_change")) return { title: "🟡 OPENCODE GO · UNCLASSIFIED CHANGE", kind: "unclassified", severity: "warning" };
-  if (changes.length > 0 && changes.every((change) => change.type === "chart_changed" && change.field === "modelId")) {
-    return { title: "🪪 OPENCODE GO · MODEL ID CHANGED", kind: "model-id", severity: "info" };
+  if (changes.length > 0 && changes.every((change) => change.type === "chart_changed" && change.field === "chartId")) {
+    return { title: "🪪 OPENCODE GO · CHART ID CHANGED", kind: "chart-id", severity: "info" };
   }
   if (changes.some((change) => change.type === "model_added")) return { title: "🆕 OPENCODE GO · NEW MODEL", kind: "model", severity: "info" };
   if (changes.some((change) => change.type === "model_removed")) return { title: "🗑 OPENCODE GO · MODEL REMOVED", kind: "model", severity: "warning" };
