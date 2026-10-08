@@ -2,6 +2,10 @@ import { resolveTelegramChatId, watcherDashboardUrl } from "./telegram.js";
 import { basePricingName, buildZenUsageYieldRanking, usageYieldFor } from "./usage-yield.js";
 
 const MAX_MESSAGE = 3850;
+// Keep a margin for the alert header, timestamp/footer, and continuation label.
+// A *single* semantic card can exceed the Telegram limit (notably unclassified
+// source excerpts), so splitting only between cards is insufficient.
+const MAX_BLOCK = 3000;
 const NUMBER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
 const YIELD = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const COST = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 });
@@ -220,19 +224,64 @@ function headline(changes) {
   return "🟣 <b>OPENCODE ZEN WATCH</b>";
 }
 
+function splitHtmlCard(html, budget = MAX_BLOCK) {
+  if (html.length <= budget) return [html];
+  const parts = [];
+  const stack = [];
+  let fragment = "";
+  let hasText = false;
+  const closeTags = (tags) => tags.slice().reverse().map((item) => `</${item.name}>`).join("");
+  const reopenTags = (tags) => tags.map((item) => item.open).join("");
+
+  // Tokenize tags and escaped entities atomically; process text as Unicode
+  // codepoints so a chunk boundary cannot split an emoji's surrogate pair.
+  const tokens = /<\/?[a-z][^>]*>|&(?:#[xX][0-9a-f]+|#\d+|[a-z]+);|[\s\S]/giu;
+  for (const [token] of html.matchAll(tokens)) {
+    const opening = /^<([a-z][\w-]*)(?:\s[^>]*)?>$/i.exec(token);
+    const closing = /^<\/([a-z][\w-]*)>$/i.exec(token);
+    if (closing && stack.at(-1)?.name !== closing[1].toLowerCase()) {
+      throw new Error("Zen Telegram card contains mismatched HTML formatting");
+    }
+    const nextStack = closing ? stack.slice(0, -1)
+      : opening ? [...stack, { name: opening[1].toLowerCase(), open: token }] : stack;
+    if (fragment.length + token.length + closeTags(nextStack).length > budget && hasText) {
+      parts.push(fragment + closeTags(stack));
+      fragment = reopenTags(stack);
+      hasText = false;
+    }
+    if (fragment.length + token.length + closeTags(nextStack).length > budget) {
+      throw new Error("Zen Telegram card contains an unbreakable formatting token");
+    }
+    fragment += token;
+    if (opening) stack.push({ name: opening[1].toLowerCase(), open: token });
+    else if (closing) stack.pop();
+    else hasText = true;
+  }
+  if (stack.length) throw new Error("Zen Telegram card has unterminated HTML formatting");
+  if (fragment) parts.push(fragment);
+  return parts;
+}
+
 export function buildZenChangeMessages(changes, snapshot, timeZone = "America/Chicago", calibrationSource = null) {
   const blocks = renderBlocks(changes, snapshot, calibrationSource);
   const header = `${headline(changes)}\n━━━━━━━━━━━━━━━━━━━━\n<b>${changes.length}</b> semantic field change${changes.length === 1 ? "" : "s"} · <b>${blocks.length}</b> update card${blocks.length === 1 ? "" : "s"}`;
   const footer = `\n\n🕒 ${esc(time(snapshot.checkedAt, timeZone))}\n🔎 Zen models API + Zen docs`;
+  const continued = "↪️ <b>OPENCODE ZEN WATCH · continued</b>\n━━━━━━━━━━━━━━━━━━━━";
+  const budget = Math.min(MAX_BLOCK, MAX_MESSAGE - Math.max(header.length, continued.length) - footer.length - 2);
+  if (budget <= 0) throw new Error("Zen Telegram alert header exceeds the message budget");
   const out = [];
   let current = header;
   for (const block of blocks) {
-    if (`${current}\n\n${block}${footer}`.length > MAX_MESSAGE && current !== header) {
-      out.push(`${current}${footer}`);
-      current = `↪️ <b>OPENCODE ZEN WATCH · continued</b>\n━━━━━━━━━━━━━━━━━━━━\n\n${block}`;
-    } else current += `\n\n${block}`;
+    for (const part of splitHtmlCard(block, budget)) {
+      if (`${current}\n\n${part}${footer}`.length > MAX_MESSAGE && current !== header) {
+        out.push(`${current}${footer}`);
+        current = continued;
+      }
+      current += `\n\n${part}`;
+    }
   }
   out.push(`${current}${footer}`);
+  if (out.some((message) => message.length > MAX_MESSAGE)) throw new Error("Zen Telegram message exceeds the safety budget");
   return out;
 }
 

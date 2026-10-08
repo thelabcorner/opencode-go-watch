@@ -116,6 +116,45 @@ test("unknown Zen docs structure changes still surface through the residual fall
   assert(changes.some((change) => change.type === "zen_unclassified_docs_change"));
 });
 
+test("oversized Zen source excerpts are chunked without invalid HTML, broken entities, or Unicode corruption", () => {
+  const fx = fixture(24);
+  const snapshot = buildZenSnapshot(parseZenDocs(fx.html), parseZenModelsApi(fx.api), "2026-10-08T20:30:00Z");
+  const marker = "&<>\"🚀";
+  const changes = [
+    { type: "zen_unclassified_docs_change", before: `BEFORE-${marker.repeat(2600)}`, after: `AFTER-${marker.repeat(2400)}` },
+  ];
+  const messages = buildZenChangeMessages(changes, snapshot);
+  assert.ok(messages.length > 3);
+  for (const message of messages) {
+    assert.ok(message.length <= 3850, `Telegram card exceeds the local size cap: ${message.length}`);
+    assert.equal(Buffer.from(message, "utf8").toString("utf8"), message, "Unicode codepoint boundary must remain intact");
+    const tags = [];
+    for (const match of message.matchAll(/<\/?(?:b|i|code)\b[^>]*>/gi)) {
+      const token = match[0];
+      const name = /[a-z]+/i.exec(token)[0];
+      if (token.startsWith("</")) assert.equal(tags.pop(), name);
+      else tags.push(name);
+    }
+    assert.deepEqual(tags, [], "every independently delivered HTML fragment must have balanced tags");
+  }
+  const combined = messages.join("\n");
+  assert.match(combined, /BEFORE-/);
+  assert.match(combined, /AFTER-/);
+  assert.equal((combined.match(/&amp;/g) ?? []).length, 5000, "no original escaped entity was lost");
+});
+
+test("many Zen price-change cards remain below the Telegram limit per message", () => {
+  const fx = fixture(24);
+  const snapshot = buildZenSnapshot(parseZenDocs(fx.html), parseZenModelsApi(fx.api), "2026-10-08T20:30:00Z");
+  const changes = Array.from({ length: 130 }, (_, i) => ({
+    type: "zen_price_changed", key: `Synthetic Price ${i}`, field: "inputPerM", before: 3, after: 2, percent: -33.3333,
+  }));
+  const messages = buildZenChangeMessages(changes, snapshot);
+  assert.ok(messages.length > 1);
+  assert.ok(messages.every((message) => message.length <= 3850));
+  assert.match(messages.join("\n"), /Synthetic Price 129/);
+});
+
 test("Zen validation fails closed on catastrophically small parser output", () => {
   const tiny = fixture(4);
   const snapshot = buildZenSnapshot(parseZenDocs(tiny.html), parseZenModelsApi(tiny.api));
