@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildZenSnapshot, diffZenSnapshots, parseZenDocs, parseZenModelsApi, runZenWatch, validateZenSnapshot } from "../src/zen.js";
+import { buildZenSnapshot, canonicalZenModelsApiText, diffZenSnapshots, parseZenDocs, parseZenModelsApi, runZenWatch, validateZenSnapshot } from "../src/zen.js";
 import { buildZenChangeMessages, sendZenTelegram, zenKeyboard } from "../src/zen-telegram.js";
 import { zenDashboard } from "../src/zen-dashboard.js";
 
@@ -64,6 +64,84 @@ test("Zen policy notes preserve decimal punctuation instead of truncating it", (
 test("Zen API parser treats model ids as authoritative availability", () => {
   const parsed = parseZenModelsApi(JSON.stringify({ object: "list", data: [{ id: "qwen3.7-plus", object: "model", created: 1, owned_by: "opencode" }, { id: "x-preview-f-free", object: "model", created: 1, owned_by: "opencode" }] }));
   assert.deepEqual(parsed.modelIds, ["qwen3.7-plus", "x-preview-f-free"]);
+});
+
+test("Zen free pricing recognizes unavailable cache operations without inferring unknown or paid cache prices as free", () => {
+  const fx = fixture(4);
+  const freeCacheOmitted = fx.html.replace(
+    "<td>Big Pickle</td><td>Free</td><td>Free</td><td>Free</td><td>-</td>",
+    "<td>Big Pickle</td><td>Free</td><td>Free</td><td>-</td><td>-</td>",
+  ).replace(
+    "<td>Qwen3.7 Plus</td><td>$1.01</td><td>$2.00</td><td>$0.10</td><td>-</td>",
+    "<td>Qwen3.7 Plus</td><td>Free</td><td>Free</td><td>—</td><td>—</td>",
+  );
+  const docs = parseZenDocs(freeCacheOmitted);
+  assert.equal(docs.pricing["Big Pickle"].free, true);
+  assert.equal(docs.pricing["Qwen3.7 Plus"].free, true, "free-row handling must generalize to an unrelated model");
+  assert.equal(buildZenSnapshot(docs, parseZenModelsApi(fx.api)).models["qwen3.7-plus"].free, true);
+  const knownCharge = parseZenDocs(freeCacheOmitted.replace(
+    "<td>Qwen3.7 Plus</td><td>Free</td><td>Free</td><td>—</td><td>—</td>",
+    "<td>Qwen3.7 Plus</td><td>Free</td><td>Free</td><td>$0.10</td><td>—</td>",
+  ));
+  assert.equal(knownCharge.pricing["Qwen3.7 Plus"].free, false);
+  const unknownCache = parseZenDocs(freeCacheOmitted.replace(
+    "<td>Qwen3.7 Plus</td><td>Free</td><td>Free</td><td>—</td><td>—</td>",
+    "<td>Qwen3.7 Plus</td><td>Free</td><td>Free</td><td>pricing pending</td><td>—</td>",
+  ));
+  assert.equal(unknownCache.pricing["Qwen3.7 Plus"].free, false);
+  const missingCache = parseZenDocs(freeCacheOmitted.replace(
+    "<td>Qwen3.7 Plus</td><td>Free</td><td>Free</td><td>—</td><td>—</td>",
+    "<td>Qwen3.7 Plus</td><td>Free</td><td>Free</td><td></td><td>—</td>",
+  ));
+  assert.equal(missingCache.pricing["Qwen3.7 Plus"].free, false, "blank is missing evidence, unlike an explicit unavailable dash");
+});
+
+test("Zen API fingerprints ignore volatile per-model created stamps, ordering, and JSON key order", () => {
+  const fx = fixture(4);
+  const a = JSON.parse(fx.api);
+  const b = { data: a.data.slice().reverse().map((item) => ({
+    owned_by: item.owned_by, created: 1800000000, object: item.object, id: item.id,
+  })), object: "list" };
+  assert.equal(canonicalZenModelsApiText(JSON.stringify(a)), canonicalZenModelsApiText(JSON.stringify(b)));
+  b.data[0].owned_by = "new-owner";
+  assert.notEqual(canonicalZenModelsApiText(JSON.stringify(a)), canonicalZenModelsApiText(JSON.stringify(b)));
+  b.data[0].owned_by = "opencode";
+  b.data[0].unknown_capability = { tier: "new" };
+  assert.notEqual(canonicalZenModelsApiText(JSON.stringify(a)), canonicalZenModelsApiText(JSON.stringify(b)));
+});
+
+test("Zen API model metadata changes remain visible even alongside model additions", () => {
+  // Duplicate and malformed API rows are checked separately below.
+  const fx = fixture(4);
+  const before = buildZenSnapshot(parseZenDocs(fx.html), parseZenModelsApi(fx.api));
+  const next = JSON.parse(fx.api);
+  next.data[1].object = "new-model-kind";
+  next.data[2].object = "new-model-kind";
+  next.data[1].unknown_capability = "new";
+  next.data.push({ id: "brand-new-model", object: "model", created: 2, owned_by: "opencode" });
+  const after = buildZenSnapshot(parseZenDocs(fx.html), parseZenModelsApi(JSON.stringify(next)));
+  const changes = diffZenSnapshots(before, after);
+  for (const id of [next.data[1].id, next.data[2].id]) {
+    assert(changes.some((change) => change.type === "zen_model_object_changed" && change.key === id
+      && change.field === "object" && change.before === "model" && change.after === "new-model-kind"));
+  }
+  assert(changes.some((change) => change.type === "zen_model_added" && change.key === "brand-new-model"));
+  assert(changes.some((change) => change.type === "zen_unclassified_api_change"), "unknown concurrent API delta must not be suppressed");
+  assert.match(buildZenChangeMessages(changes, after).join("\n"), /ZEN API MODEL TYPE CHANGED/);
+  assert(!diffZenSnapshots(before, before).some((change) => change.type === "zen_model_object_changed"));
+});
+
+test("Zen models API fails closed on duplicate or malformed rows instead of creating false removals", () => {
+  for (const data of [
+    [{ id: "model-a" }, { id: "model-a" }],
+    [{ id: "model-a" }, { owned_by: "opencode" }],
+    [{ id: "model-a" }, { id: "  model-b" }],
+    [{ id: "model-a" }, null],
+  ]) {
+    const raw = JSON.stringify({ object: "list", data });
+    assert.throws(() => parseZenModelsApi(raw), /invalid model row|duplicate or non-canonical/);
+    assert.throws(() => canonicalZenModelsApiText(raw), /invalid model row|duplicate or non-canonical/);
+  }
 });
 
 test("new and removed free model availability gets dedicated semantic events", () => {
@@ -205,4 +283,88 @@ test("Zen watcher bootstraps from docs + API and then uses conditional 304 fast 
   const unchanged = await runZenWatch(env, { fetchImpl: async () => new Response(null, { status: 304 }), now: new Date("2026-08-20T00:05:00Z") });
   assert.equal(unchanged.status, "unchanged");
   assert.equal(unchanged.optimization, "304");
+});
+
+test("Zen watcher skips semantic work when the API only regenerates created timestamps", async () => {
+  const fx = fixture(24);
+  const env = { STATE: new FakeKV(), OPENCODE_ZEN_DOCS_URL: "https://example/zen-docs", OPENCODE_ZEN_MODELS_URL: "https://example/models" };
+  await runZenWatch(env, {
+    fetchImpl: async (url) => new Response(url.includes("models") ? fx.api : fx.html, { status: 200, headers: { etag: '"first"' } }),
+    now: new Date("2026-10-08T20:00:00Z"),
+  });
+  const updated = JSON.parse(fx.api);
+  updated.data.reverse().forEach((item) => { item.created = 1900000000; });
+  let notifications = 0;
+  const result = await runZenWatch(env, {
+    fetchImpl: async (url) => url.includes("models")
+      ? new Response(JSON.stringify(updated), { status: 200, headers: { etag: '"second"' } })
+      : new Response(null, { status: 304 }),
+    now: new Date("2026-10-08T20:05:00Z"),
+    notifyChanges: async () => { notifications++; },
+  });
+  assert.equal(result.status, "unchanged");
+  assert.equal(result.optimization, "fingerprint");
+  assert.equal(notifications, 0);
+  assert.equal((await env.STATE.get("zen:hot:v1", { type: "json" })).sourceState.api.etag, '"second"');
+});
+
+test("legacy Zen hot-cache schema reparses and silently corrects cached free-pricing state", async () => {
+  const fx = fixture(24);
+  const updatedHtml = fx.html.replace(
+    "<td>Big Pickle</td><td>Free</td><td>Free</td><td>Free</td><td>-</td>",
+    "<td>Big Pickle</td><td>Free</td><td>Free</td><td>-</td><td>-</td>",
+  );
+  const env = { STATE: new FakeKV(), OPENCODE_ZEN_DOCS_URL: "https://example/zen-docs", OPENCODE_ZEN_MODELS_URL: "https://example/models" };
+  const full = async (url) => new Response(url.includes("models") ? fx.api : updatedHtml, {
+    status: 200, headers: { etag: url.includes("models") ? '"api1"' : '"docs1"' },
+  });
+  await runZenWatch(env, { fetchImpl: full, now: new Date("2026-10-08T20:00:00Z") });
+  const old = await env.STATE.get("zen:snapshot:v1", { type: "json" });
+  old.docs.pricing["Big Pickle"].free = false;
+  old.models["big-pickle"].pricing[0].free = false;
+  await env.STATE.put("zen:snapshot:v1", JSON.stringify(old));
+  const hot = await env.STATE.get("zen:hot:v1", { type: "json" });
+  hot.schema = 1;
+  await env.STATE.put("zen:hot:v1", JSON.stringify(hot));
+
+  let notifications = 0;
+  const result = await runZenWatch(env, {
+    fetchImpl: async (url, init) => {
+      assert.equal(init.headers["if-none-match"], undefined, "migration needs a full source re-fetch");
+      return full(url);
+    },
+    now: new Date("2026-10-08T20:05:00Z"),
+    notifyChanges: async () => { notifications++; },
+  });
+  assert.equal(result.status, "unchanged");
+  assert.equal(notifications, 0, "parser correction must not invent a public price change");
+  const saved = await env.STATE.get("zen:snapshot:v1", { type: "json" });
+  assert.equal(saved.docs.pricing["Big Pickle"].free, true);
+  assert.equal(saved.models["big-pickle"].pricing[0].free, true);
+  assert.equal((await env.STATE.get("zen:hot:v1", { type: "json" })).schema, 2);
+  const next = await runZenWatch(env, {
+    fetchImpl: async () => new Response(null, { status: 304 }),
+    now: new Date("2026-10-08T20:10:00Z"),
+  });
+  assert.equal(next.optimization, "304", "migration must only occur once");
+});
+
+test("legacy Zen schema rejects accidental 304 responses without discarding the baseline", async () => {
+  const fx = fixture(24);
+  const env = { STATE: new FakeKV(), OPENCODE_ZEN_DOCS_URL: "https://example/zen-docs", OPENCODE_ZEN_MODELS_URL: "https://example/models" };
+  await runZenWatch(env, {
+    fetchImpl: async (url) => new Response(url.includes("models") ? fx.api : fx.html, { status: 200 }),
+    now: new Date("2026-10-08T20:00:00Z"),
+  });
+  const hot = await env.STATE.get("zen:hot:v1", { type: "json" });
+  hot.schema = 1;
+  await env.STATE.put("zen:hot:v1", JSON.stringify(hot));
+  const baselineBefore = await env.STATE.get("zen:snapshot:v1");
+  await assert.rejects(runZenWatch(env, {
+    fetchImpl: async (url) => url.includes("models")
+      ? new Response(null, { status: 304 })
+      : new Response(fx.html, { status: 200 }),
+  }), /requires full docs and API bodies/);
+  assert.equal(await env.STATE.get("zen:snapshot:v1"), baselineBefore);
+  assert.equal((await env.STATE.get("zen:hot:v1", { type: "json" })).schema, 1);
 });

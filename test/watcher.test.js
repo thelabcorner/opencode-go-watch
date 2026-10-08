@@ -4,7 +4,8 @@ import { readFile } from "node:fs/promises";
 import { readSnapshot, runWatch } from "../src/watcher.js";
 
 const goHtml = await readFile(new URL("./fixtures/go.html", import.meta.url), "utf8");
-const docsHtml = await readFile(new URL("./fixtures/docs.html", import.meta.url), "utf8");
+// Historical row-edit fixtures are LF-delimited even on Windows checkouts.
+const docsHtml = (await readFile(new URL("./fixtures/docs.html", import.meta.url), "utf8")).replace(/\r\n/g, "\n");
 
 class FakeKV {
   map = new Map();
