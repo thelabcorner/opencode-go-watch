@@ -6,6 +6,8 @@ const HOT_KEY = "zen:hot:v1";
 const META_KEY = "zen:meta:v1";
 const ERROR_KEY = "zen:error:v1";
 const SCHEMA = 1;
+// Hot-cache schema is independent of the long-lived snapshot schema.
+const HOT_SCHEMA = 2;
 const ERROR_REMINDER_MS = 6 * 60 * 60 * 1000;
 const HEARTBEAT_MS = 60 * 60 * 1000;
 const MIN_API_MODELS = 20;
@@ -34,6 +36,11 @@ function parsePrice(value) {
   if (!match) return null;
   const parsed = Number(match[1].replaceAll(",", ""));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function freeOrUnavailableCachePrice(value) {
+  const source = normalizeSpace(value);
+  return /^free$/i.test(source) || source === "-" || source === "—" || /^\$0(?:\.0+)?$/.test(source);
 }
 
 function canonicalName(value) {
@@ -78,7 +85,10 @@ function rowsToPricing(rows) {
     const outputPerM = parsePrice(row[2]);
     const cachedReadPerM = parsePrice(row[3]);
     const cachedWritePerM = parsePrice(row[4]);
-    const free = inputPerM === 0 && outputPerM === 0 && cachedReadPerM === 0;
+    // Zen publishes free models with a dash for unsupported cache operations.
+    // A dash is not a charge; unknown non-numeric text is not proof of free service.
+    const free = inputPerM === 0 && outputPerM === 0
+      && freeOrUnavailableCachePrice(row[3]) && freeOrUnavailableCachePrice(row[4]);
     out[normalizeSpace(row[0])] = { inputPerM, outputPerM, cachedReadPerM, cachedWritePerM, free };
   }
   return out;
@@ -193,10 +203,44 @@ export function parseZenDocs(html) {
   return parsePreparedZenDocs(prepareZenDocsPage(html));
 }
 
-export function parseZenModelsApi(text) {
+function readZenApiJson(text) {
   let parsed;
   try { parsed = JSON.parse(String(text ?? "")); } catch { throw new Error("Zen models API returned invalid JSON"); }
   if (!parsed || !Array.isArray(parsed.data)) throw new Error("Zen models API response is missing data[]");
+  const ids = new Set();
+  for (const item of parsed.data) {
+    if (!item || typeof item !== "object" || Array.isArray(item) || typeof item.id !== "string" || !item.id.trim()) {
+      throw new Error("Zen models API contains an invalid model row; preserving existing baseline");
+    }
+    const id = item.id.trim();
+    if (id !== item.id || ids.has(id)) throw new Error("Zen models API contains duplicate or non-canonical model ID: " + id);
+    ids.add(id);
+  }
+  return parsed;
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableJson(value[key])]));
+  }
+  return value;
+}
+
+// The public API regenerates data[].created on each request. Hash stable
+// content, not response bytes; preserve other fields, including unknown ones.
+export function canonicalZenModelsApiText(text) {
+  const parsed = readZenApiJson(text);
+  const data = parsed.data.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const { created: _created, ...stable } = item;
+    return stable;
+  }).sort((a, b) => String(a?.id ?? "").localeCompare(String(b?.id ?? "")));
+  return JSON.stringify(stableJson({ ...parsed, data }));
+}
+
+export function parseZenModelsApi(text) {
+  const parsed = readZenApiJson(text);
   const models = parsed.data
     .filter((item) => item && typeof item.id === "string" && item.id.trim())
     .map((item) => ({ id: item.id.trim(), object: typeof item.object === "string" ? item.object : null, ownedBy: typeof item.owned_by === "string" ? item.owned_by : null }))
@@ -213,7 +257,13 @@ export function parseZenModelsApi(text) {
     })
     .filter(Boolean)
     .sort((a, b) => String(a?.[0]).localeCompare(String(b?.[0])));
-  return { models, modelIds: models.map((item) => item.id), monitorStructure: JSON.stringify(extras) };
+  const rootExtras = Object.fromEntries(Object.entries(parsed).filter(([key]) => key !== "data" && key !== "object"));
+  if (parsed.object != null && parsed.object !== "list") rootExtras.object = parsed.object;
+  // Preserve the historical empty-array representation for stored baseline compatibility.
+  const monitorStructure = Object.keys(rootExtras).length
+    ? JSON.stringify(stableJson({ root: rootExtras, models: extras }))
+    : JSON.stringify(extras);
+  return { models, modelIds: models.map((item) => item.id), monitorStructure };
 }
 
 const SPECIAL_NAMES = Object.freeze({
@@ -315,6 +365,8 @@ export function diffZenSnapshots(previous, next) {
   const changes = [];
   const beforeIds = new Set(previous.api.modelIds);
   const afterIds = new Set(next.api.modelIds);
+  const beforeApiModels = new Map((previous.api.models ?? []).map((model) => [model.id, model]));
+  const afterApiModels = new Map((next.api.models ?? []).map((model) => [model.id, model]));
   for (const id of next.api.modelIds) {
     if (beforeIds.has(id)) continue;
     const model = next.models[id];
@@ -331,6 +383,9 @@ export function diffZenSnapshots(previous, next) {
     const after = next.models[id];
     if (Boolean(before?.free) !== Boolean(after?.free)) changes.push({ type: after?.free ? "zen_model_became_free" : "zen_model_no_longer_free", key: id, before, after });
     if ((before?.ownedBy ?? null) !== (after?.ownedBy ?? null)) changes.push({ type: "zen_model_owner_changed", key: id, before: before?.ownedBy ?? null, after: after?.ownedBy ?? null });
+    const beforeObject = beforeApiModels.get(id)?.object ?? null;
+    const afterObject = afterApiModels.get(id)?.object ?? null;
+    if (beforeObject !== afterObject) changes.push({ type: "zen_model_object_changed", key: id, field: "object", before: beforeObject, after: afterObject });
   }
 
   const pricingKeys = new Set([...Object.keys(previous.docs.pricing), ...Object.keys(next.docs.pricing)]);
@@ -389,8 +444,9 @@ export function diffZenSnapshots(previous, next) {
   if (!knownDocs && previous.docs.monitorStructure !== next.docs.monitorStructure) {
     changes.push({ type: "zen_unclassified_docs_change", source: "zen_docs", ...firstDifference(previous.docs.monitorStructure, next.docs.monitorStructure) });
   }
-  const apiSemanticChanged = changes.some((change) => ["zen_model_added", "zen_model_removed", "zen_free_model_added", "zen_free_model_removed", "zen_model_owner_changed"].includes(change.type));
-  if (!apiSemanticChanged && previous.api.monitorStructure !== next.api.monitorStructure) {
+  // API residuals contain ONLY fields outside the known model/owner/object schema.
+  // Their changes are independent of any simultaneous known model transition.
+  if (previous.api.monitorStructure !== next.api.monitorStructure) {
     changes.push({ type: "zen_unclassified_api_change", source: "zen_api", ...firstDifference(previous.api.monitorStructure, next.api.monitorStructure) });
   }
   return changes;
@@ -433,7 +489,7 @@ async function maybeHeartbeat(env, now, previousMeta, extra = {}) {
 }
 
 function hotRecord(sourceState) {
-  return { schema: 1, sourceState };
+  return { schema: HOT_SCHEMA, sourceState };
 }
 
 export async function readZenSnapshot(env) {
@@ -477,10 +533,14 @@ export async function runZenWatch(env, options = {}) {
   const docsUrl = env.OPENCODE_ZEN_DOCS_URL || "https://opencode.ai/docs/zen/";
   const apiUrl = env.OPENCODE_ZEN_MODELS_URL || "https://opencode.ai/zen/v1/models";
   const [hot, previousMeta, priorError] = await Promise.all([readJson(env, HOT_KEY), readJson(env, META_KEY), readJson(env, ERROR_KEY)]);
+  const refreshParser = hot?.schema !== HOT_SCHEMA;
   const [docsFetch, apiFetch] = await Promise.all([
-    fetchSource(docsUrl, hot?.sourceState?.docs, fetchImpl),
-    fetchSource(apiUrl, hot?.sourceState?.api, fetchImpl),
+    fetchSource(docsUrl, refreshParser ? null : hot?.sourceState?.docs, fetchImpl),
+    fetchSource(apiUrl, refreshParser ? null : hot?.sourceState?.api, fetchImpl),
   ]);
+  if (refreshParser && (docsFetch.unchanged || apiFetch.unchanged)) {
+    throw new Error("Zen parser refresh requires full docs and API bodies; preserving existing baseline");
+  }
 
   if (docsFetch.unchanged && apiFetch.unchanged) {
     await maybeHeartbeat(env, now, previousMeta, { optimization: "304" });
@@ -497,14 +557,14 @@ export async function runZenWatch(env, options = {}) {
   if (docsChanged) {
     docsPrepared = prepareZenDocsPage(docsFetch.body);
     docsFingerprint = await sha256Text(docsPrepared.fingerprintSource);
-    if (docsFingerprint === hot?.sourceState?.docs?.fingerprint) docsChanged = false;
+    if (!refreshParser && docsFingerprint === hot?.sourceState?.docs?.fingerprint) docsChanged = false;
   }
 
   let apiFingerprint = hot?.sourceState?.api?.fingerprint ?? null;
   let apiChanged = !apiFetch.unchanged;
   if (apiChanged) {
-    apiFingerprint = await sha256Text(apiFetch.body);
-    if (apiFingerprint === hot?.sourceState?.api?.fingerprint) apiChanged = false;
+    apiFingerprint = await sha256Text(canonicalZenModelsApiText(apiFetch.body));
+    if (!refreshParser && apiFingerprint === hot?.sourceState?.api?.fingerprint) apiChanged = false;
   }
 
   const nextHot = hotRecord({
@@ -560,6 +620,9 @@ export async function runZenWatch(env, options = {}) {
     return { status: "changed", changes, snapshot: next, optimization: docsChanged && apiChanged ? "both" : docsChanged ? "docs" : "api", recoveredFrom: priorError ?? null };
   }
 
+  // Corrected parser-derived fields need one silent KV snapshot migration,
+  // even when no upstream source semantics actually changed.
+  if (refreshParser) await env.STATE.put(SNAPSHOT_KEY, JSON.stringify(next));
   await env.STATE.put(HOT_KEY, JSON.stringify(nextHot));
   await maybeHeartbeat(env, now, previousMeta, { optimization: docsChanged && apiChanged ? "both-no-semantic" : docsChanged ? "docs-no-semantic" : "api-no-semantic" });
   if (priorError) {

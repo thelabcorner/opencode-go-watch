@@ -195,6 +195,9 @@ function renderBlocks(changes, snapshot, calibrationSource) {
       case "zen_model_owner_changed":
         blocks.push(`🏢 <b>ZEN MODEL OWNER CHANGED</b>\n<code>${esc(change.key)}</code>\n<code>${esc(change.before ?? "none")} → ${esc(change.after ?? "none")}</code>`);
         break;
+      case "zen_model_object_changed":
+        blocks.push("🔌 <b>ZEN API MODEL TYPE CHANGED</b>\n<code>" + esc(change.key) + "</code>\n<code>" + esc(change.before ?? "none") + " → " + esc(change.after ?? "none") + "</code>");
+        break;
       case "zen_consistency_changed":
         blocks.push(`⚠️ <b>ZEN DOCS / API COVERAGE CHANGED</b>\n<b>${esc(change.key)}</b>\n<code>${esc(JSON.stringify(change.before))}</code>\n↓\n<code>${esc(JSON.stringify(change.after))}</code>`);
         break;

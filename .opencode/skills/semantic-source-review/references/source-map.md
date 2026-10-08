@@ -92,7 +92,13 @@ Use as the primary public availability surface for Zen. The current watcher deli
 
 The API can lead the docs. An API-only model is therefore not automatically parser noise; it may be a rollout/docs-lag state that deserves explicit consistency semantics.
 
+October 8, 2026 live review: 87 API models, 88 documented endpoints, and 103 pricing rows were observed. Two API model IDs were not in the docs endpoint table, and three documented IDs were missing from the API. These are *time-specific observations*, not an assertion that the model catalogs must match.
+
+Like the Go models API, the Zen API regenerated per-model created values on retrieval. Ignore these transport timestamps (as well as JSON object/row ordering) during fingerprinting, while retaining model IDs, ownership, type, root metadata, and unfamiliar stable model fields. An unfamiliar model attribute must still produce an API residual alert if another model is simultaneously added or removed. The old Zen snapshot remains valid; changing the hot fingerprint algorithm causes at most one reparse of the unchanged source.
+
 ### Zen docs
+
+October 8, 2026 live pricing example: **Jev 1.13 Free** has Free input/output rates with dashes for its cache operations. A dash in a cache column means no published cache charge, **not** that the base model is paid. Classify this and all sibling rows with Free input/output and zero/unsupported cache operations as free; do not infer free from arbitrary unknown cache text or a positive cache rate. This never implies unlimited requests.
 
 Use for:
 
