@@ -97,6 +97,29 @@ test("unchanged runs are silent and do not burn KV writes every poll", async () 
   assert.equal(e.STATE.writes.length, writesAfterBootstrap);
 });
 
+test("Starlight tab-ID regeneration is silent, without hiding the next real docs change", async () => {
+  const starlight = (offset) => `<div role="tablist">
+    <a id="tab-${offset}" href="#tab-panel-${offset}" aria-selected="true">Go</a>
+    <a id="tab-${offset + 1}" href="#tab-panel-${offset + 1}" aria-selected="false">Go Plus</a>
+    </div><div id="tab-panel-${offset}" aria-labelledby="tab-${offset}">Current plan</div>
+    <div id="tab-panel-${offset + 1}" aria-labelledby="tab-${offset + 1}" hidden>Other plan</div>`;
+  const page = (offset) => docsHtml.replace("<h2>Usage limits</h2>", `<h2>Usage limits</h2>${starlight(offset)}${starlight(offset + 2)}`);
+  const e = env();
+  await runWatch(e, { fetchImpl: makeFetch({ docs: page(0) }), now: new Date("2026-10-11T01:00:00Z") });
+  const alerts = [];
+  const offsetOnly = await runWatch(e, { fetchImpl: makeFetch({ docs: page(4), telegram: alerts }), now: new Date("2026-10-11T01:10:00Z") });
+  assert.equal(offsetOnly.status, "unchanged");
+  assert.deepEqual(offsetOnly.changes, []);
+  assert.equal(alerts.length, 0);
+
+  const realChange = page(8).replace("<td>2,050</td>", "<td>2,060</td>");
+  const changed = await runWatch(e, { fetchImpl: makeFetch({ docs: realChange, telegram: alerts }), now: new Date("2026-10-11T01:20:00Z") });
+  assert.equal(changed.status, "changed");
+  assert(changed.changes.some((change) => change.type === "request_limit_changed" && change.key === "GPT 5.6 Luna" && change.field === "requests5h"));
+  assert.equal(changed.changes.some((change) => change.type === "unclassified_source_change"), false);
+  assert.equal(alerts.length, 1);
+});
+
 test("changed docs data produces one grouped semantic Telegram card", async () => {
   const e = env();
   await runWatch(e, { fetchImpl: makeFetch(), now: new Date("2026-08-19T18:00:00Z") });

@@ -106,6 +106,31 @@ function normalizeKnownMonitorVariants(value) {
   return String(value ?? "").replace(WRAPPED_REGION_RE, (_match, href) => token(href)).replace(DIRECT_REGION_RE, (_match, href) => token(href));
 }
 
+/**
+ * Starlight generates consecutive tab/panel IDs from a page-wide counter.
+ * Adding an unrelated tab group before Go's usage section offsets every ID,
+ * without changing which tab controls which panel. Historical snapshots already
+ * retain href/aria-labelledby but drop the generated id attributes, so compare
+ * *relative* references here rather than changing the persisted schema.
+ *
+ * The first reference supplies a shared origin for both kinds of reference.
+ * Preserve their relative offsets, selection/visibility state, all non-tab links,
+ * and unfamiliar attributes so broken associations and real drift still alert.
+ */
+function normalizeDocsGeneratedTabReferences(value) {
+  let origin = null;
+  return String(value ?? "").replace(/<(a|div)\b[^>]*>/g, (tag, kind) => {
+    const match = kind === "a" && /\baria-selected="(?:true|false)"/.test(tag)
+      ? /\bhref="#tab-panel-(\d+)"/.exec(tag)
+      : kind === "div" ? /\baria-labelledby="tab-(\d+)"/.exec(tag) : null;
+    if (!match) return tag;
+    const index = Number(match[1]);
+    if (!Number.isSafeInteger(index)) return tag;
+    origin ??= index;
+    return tag.replace(match[0], match[0].replace(`-${match[1]}"`, `-${index - origin}"`));
+  });
+}
+
 function decodeMonitorText(value) {
   return String(value ?? "").replace(/<[^>]+>/g, "").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&#39;", "'").replace(/\s+/g, " ").trim();
 }
@@ -231,8 +256,10 @@ export function diffSnapshots(before, after) {
   }
 
   const docsKnown = changes.some((change) => DOCS_CHANGE_TYPES.has(change.type));
-  if (!docsKnown && typeof before.docs.monitorStructure === "string" && typeof after.docs.monitorStructure === "string" && before.docs.monitorStructure !== after.docs.monitorStructure) {
-    changes.push({ type: "unclassified_source_change", source: "docs", ...compactStructureDelta(before.docs.monitorStructure, after.docs.monitorStructure) });
+  const beforeDocsStructure = typeof before.docs.monitorStructure === "string" ? normalizeDocsGeneratedTabReferences(before.docs.monitorStructure) : null;
+  const afterDocsStructure = typeof after.docs.monitorStructure === "string" ? normalizeDocsGeneratedTabReferences(after.docs.monitorStructure) : null;
+  if (!docsKnown && beforeDocsStructure != null && afterDocsStructure != null && beforeDocsStructure !== afterDocsStructure) {
+    changes.push({ type: "unclassified_source_change", source: "docs", ...compactStructureDelta(beforeDocsStructure, afterDocsStructure) });
   }
   return changes;
 }

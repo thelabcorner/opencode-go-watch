@@ -11,6 +11,63 @@ function snap() {
   return { schema: 1, checkedAt: "2026-08-19T18:00:00.000Z", go: parseGoPage(goHtml), docs: parseDocsPage(docsHtml) };
 }
 
+function starlightTabs(start = 0) {
+  return [0, 2].map((group) => `<div class="tabs">
+    <div role="tablist">
+      <a id="tab-${start + group}" aria-selected="true" href="#tab-panel-${start + group}">Go</a>
+      <a id="tab-${start + group + 1}" aria-selected="false" href="#tab-panel-${start + group + 1}">Go Plus</a>
+    </div>
+    <div id="tab-panel-${start + group}" aria-labelledby="tab-${start + group}"><p>Current tier</p></div>
+    <div id="tab-panel-${start + group + 1}" aria-labelledby="tab-${start + group + 1}" hidden><p>Other tier</p></div>
+  </div>`).join("");
+}
+
+function docsWithTabs(markup) {
+  return parseDocsPage(docsHtml.replace("<h2>Usage limits</h2>", `<h2>Usage limits</h2>${markup}`));
+}
+
+test("Starlight's page-wide generated tab IDs do not create unclassified usage-docs alerts", () => {
+  const before = { ...snap(), docs: docsWithTabs(starlightTabs(0)) };
+  const after = { ...snap(), docs: docsWithTabs(starlightTabs(4)) };
+  assert.match(before.docs.monitorStructure, /href="#tab-panel-0"/);
+  assert.match(after.docs.monitorStructure, /aria-labelledby="tab-7"/);
+  assert.deepEqual(diffSnapshots(before, after), []);
+
+  // A different initial page-wide counter and a different model lineup should
+  // obey the same general rule, rather than the exact reported 0 -> 4 shift.
+  const siblingBefore = { ...snap(), docs: docsWithTabs(starlightTabs(27)) };
+  const siblingAfter = { ...snap(), docs: docsWithTabs(starlightTabs(108)) };
+  assert.deepEqual(diffSnapshots(siblingBefore, siblingAfter), []);
+});
+
+test("Starlight tab normalization preserves broken references and real tab state", () => {
+  const baseline = { ...snap(), docs: docsWithTabs(starlightTabs(0)) };
+  const brokenHref = { ...snap(), docs: docsWithTabs(starlightTabs(4).replace('href="#tab-panel-5"', 'href="#tab-panel-6"')) };
+  const brokenLabel = { ...snap(), docs: docsWithTabs(starlightTabs(4).replace('aria-labelledby="tab-5"', 'aria-labelledby="tab-4"')) };
+  const changedState = { ...snap(), docs: docsWithTabs(starlightTabs(4).replace('aria-selected="false"', 'aria-selected="true"')) };
+  const unknownAttribute = { ...snap(), docs: docsWithTabs(starlightTabs(4).replace('href="#tab-panel-4"', 'href="#tab-panel-4" data-policy="restricted"')) };
+  const otherAnchor = { ...snap(), docs: docsWithTabs(starlightTabs(4).replace('href="#tab-panel-4"', 'href="#different-panel"')) };
+  for (const candidate of [brokenHref, brokenLabel, changedState, unknownAttribute, otherAnchor]) {
+    const changes = diffSnapshots(baseline, candidate);
+    assert.equal(changes.length, 1);
+    assert.equal(changes[0].type, "unclassified_source_change");
+    assert.equal(changes[0].source, "docs");
+  }
+});
+
+test("tab offset churn does not hide an independently typed usage-limit change", () => {
+  const before = { ...snap(), docs: docsWithTabs(starlightTabs(0)) };
+  const after = { ...snap(), docs: docsWithTabs(starlightTabs(4)) };
+  after.docs.requests["GPT 5.6 Luna"].requests5h += 10;
+  const changes = diffSnapshots(before, after);
+  assert.deepEqual(changes.filter((change) => change.type === "request_limit_changed"), [{
+    type: "request_limit_changed", key: "GPT 5.6 Luna", field: "requests5h", before: 2050, after: 2060,
+    absolute: 10, percent: 10 / 2050 * 100,
+  }]);
+  assert(changes.some((change) => change.type === "consistency_mismatch" && change.key === "GPT 5.6 Luna"));
+  assert.equal(changes.some((change) => change.type === "unclassified_source_change"), false);
+});
+
 test("finds changed requests, additions/removals, pricing and chart changes", () => {
   const before = snap();
   const after = structuredClone(before);
